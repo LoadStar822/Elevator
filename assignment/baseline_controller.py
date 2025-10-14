@@ -195,7 +195,7 @@ class GreedyNearestController(ElevatorController):
 
     def _assign_next_target(self, elevator: ProxyElevator) -> None:
         """为指定电梯选择下一目标楼层"""
-        target = self._pick_next_destination(elevator)
+        target, request = self._pick_next_destination(elevator)
         if target is None:
             if (
                 elevator.current_floor != self.default_idle_floor
@@ -211,27 +211,48 @@ class GreedyNearestController(ElevatorController):
             self.dispatch_history[elevator.id].append(target)
             if self.debug:
                 print(f"电梯 {elevator.id} -> 目标楼层 F{target}")
+        else:
+            if request is not None and self.waiting_requests.get(request.passenger_id) is request:
+                request.assigned_elevator = None
 
-    def _pick_next_destination(self, elevator: ProxyElevator) -> Optional[int]:
+    def _pick_next_destination(self, elevator: ProxyElevator) -> Tuple[Optional[int], Optional[PendingRequest]]:
         """计算电梯的下一目标楼层"""
         pressed = elevator.pressed_floors
         if pressed:
             pressed.sort(key=lambda floor: abs(floor - elevator.current_floor))
-            return pressed[0]
+            return pressed[0], None
         candidate = self._choose_waiting_request(elevator)
         if candidate:
             request = candidate
             request.assigned_elevator = elevator.id
-            return request.origin
-        return None
+            return request.origin, request
+        return None, None
 
     def _choose_waiting_request(self, elevator: ProxyElevator) -> Optional[PendingRequest]:
         """
         从等待队列中挑选最合适的乘客
         策略：优先选择距离最近、尚未被其他电梯抢占的呼叫；如无可用请求，则尝试接过超时太久的请求
         """
-        unclaimed = [req for req in self.waiting_requests.values() if req.assigned_elevator in (None, elevator.id)]
+        unclaimed: List[PendingRequest] = []
+        for req in self.waiting_requests.values():
+            if req.assigned_elevator not in (None, elevator.id):
+                continue
+            if not self._elevator_can_serve_request(elevator, req):
+                if req.assigned_elevator == elevator.id:
+                    req.assigned_elevator = None
+                continue
+            unclaimed.append(req)
         if not unclaimed:
             return None
         unclaimed.sort(key=lambda req: (req.priority_key(elevator.current_floor), req.arrive_tick))
         return unclaimed[0]
+
+    def _elevator_can_serve_request(self, elevator: ProxyElevator, request: PendingRequest) -> bool:
+        served = getattr(elevator, "served_floors", None)
+        if not served:
+            return True
+        if request.origin not in served:
+            return False
+        if request.destination not in served:
+            return False
+        return True

@@ -16,7 +16,7 @@ import sys
 import threading
 from typing import Dict, List, Optional, Tuple
 
-from flask import Flask, jsonify, send_from_directory
+from flask import Flask, jsonify, send_from_directory, request
 import logging
 
 from elevator_saga.client.api_client import ElevatorAPIClient
@@ -121,6 +121,21 @@ def _collect_state() -> Dict[str, object]:
     passengers = list(state.passengers.values())
     completed = [psg for psg in passengers if psg.status == PassengerStatus.COMPLETED]
 
+    passenger_snapshots: List[Dict[str, object]] = []
+    for psg in passengers:
+        passenger_snapshots.append(
+            {
+                "id": psg.id,
+                "status": psg.status.value,
+                "origin": psg.origin,
+                "destination": psg.destination,
+                "elevator": psg.elevator_id,
+                "arrive_tick": psg.arrive_tick,
+                "pickup_tick": psg.pickup_tick,
+                "dropoff_tick": psg.dropoff_tick,
+            }
+        )
+
     def _current_floor_wait(psg: object) -> float:
         if psg.status == PassengerStatus.WAITING:
             return max(state.tick - psg.arrive_tick, 0)
@@ -163,12 +178,16 @@ def _collect_state() -> Dict[str, object]:
         "p95_arrival_wait_time": _percentile(arrival_waits, 0.95),
     }
 
+    traffic_info = client.get_traffic_info() or {}
+
     return {
         "tick": state.tick,
         "elevators": elevators,
         "floors": floors,
         "metrics": metrics,
         "controller_running": _controller_running(),
+        "traffic": traffic_info,
+        "passengers": passenger_snapshots,
     }
 
 
@@ -177,6 +196,38 @@ def dashboard_state() -> object:
     """返回可视化需要的关键信息"""
     snapshot = _collect_state()
     return jsonify(snapshot)
+
+
+@app.route("/dashboard/traffic/list")
+def dashboard_traffic_list() -> object:
+    """返回测试用例列表"""
+    client = _create_api_client()
+    catalog = client.get_traffic_catalog()
+    return jsonify(catalog)
+
+
+@app.route("/dashboard/traffic/select", methods=["POST"])
+def dashboard_traffic_select() -> object:
+    """切换到指定测试用例"""
+    if _controller_running():
+        return (
+            jsonify({"success": False, "message": "请先停止调度再切换测试用例。", "controller_running": True}),
+            409,
+        )
+
+    data = request.get_json(silent=True) or {}
+    try:
+        index = int(data.get("index", -1))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "message": "缺少有效的测试用例编号。"}), 400
+
+    client = _create_api_client()
+    result = client.select_traffic(index)
+    if not result.get("success"):
+        message = result.get("error") or "切换测试用例失败。"
+        return jsonify({"success": False, "message": message}), 400
+
+    return jsonify(result)
 
 
 @app.route("/dashboard/start", methods=["POST"])

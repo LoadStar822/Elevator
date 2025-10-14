@@ -85,7 +85,7 @@ if [[ "${RUN_DASHBOARD}" -eq 1 ]]; then
   python -m assignment.web_dashboard &
   DASHBOARD_PID=$!
   sleep 1
-  echo "请在浏览器访问 http://127.0.0.1:8050 并点击“启动调度”按钮开始模拟。"
+  echo "请在浏览器访问 http://127.0.0.1:8050，选择测试用例后点击“载入测试”，再点击“启动调度”开始模拟。"
   echo "若需退出，请在本终端按 Ctrl+C。"
   wait "${DASHBOARD_PID}"
 else
