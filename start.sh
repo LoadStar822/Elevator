@@ -8,6 +8,8 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="${PROJECT_ROOT}/.venv"
+TRAFFIC_DIR="${PROJECT_ROOT}/elevator_saga/traffic"
+CUSTOM_SCENARIO_DIR="${PROJECT_ROOT}/data/scenarios"
 
 RUN_DASHBOARD=1
 REINSTALL=0
@@ -57,6 +59,31 @@ if [ ! -f "${VENV_DIR}/.deps_installed" ]; then
 else
   echo "发现已安装依赖，跳过安装步骤。"
 fi
+
+sync_custom_traffic() {
+  if [ ! -d "${CUSTOM_SCENARIO_DIR}" ]; then
+    return
+  fi
+
+  shopt -s nullglob
+  local custom_files=("${CUSTOM_SCENARIO_DIR}"/*.json)
+  shopt -u nullglob
+  if [ "${#custom_files[@]}" -eq 0 ]; then
+    return
+  fi
+
+  echo "同步自定义测试用例至 elevator_saga/traffic ..."
+  find "${TRAFFIC_DIR}" -maxdepth 1 -type f -name 'custom_*.json' -exec rm -f {} +
+
+  for src in "${custom_files[@]}"; do
+    local base dest
+    base="$(basename "${src}")"
+    dest="${TRAFFIC_DIR}/custom_${base}"
+    cp "${src}" "${dest}"
+  done
+}
+
+sync_custom_traffic
 
 echo "启动电梯模拟器..."
 python -m assignment.run_server &

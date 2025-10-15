@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import time
+from collections import Counter
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -58,6 +59,7 @@ class GreedyNearestController(ElevatorController):
         self.last_known_tick: int = 0
         self.dispatch_history: Dict[int, List[int]] = {}
         self.default_idle_floor: int = 0
+        self.drop_targets: Dict[int, Counter[int]] = {}
         # 从环境变量读取 tick 间隔，默认 0.2s 便于可视化观察
         if tick_delay is not None:
             self.tick_delay = tick_delay
@@ -72,6 +74,7 @@ class GreedyNearestController(ElevatorController):
     def on_init(self, elevators: List[ProxyElevator], floors: List[ProxyFloor]) -> None:
         self.waiting_requests.clear()
         self.dispatch_history = {e.id: [] for e in elevators}
+        self.drop_targets = {e.id: Counter() for e in elevators}
         if floors:
             self.default_idle_floor = floors[0].floor
         print(f"初始化完成：{len(elevators)} 部电梯，服务楼层 {len(floors)} 层")
@@ -172,10 +175,18 @@ class GreedyNearestController(ElevatorController):
 
     def on_passenger_board(self, elevator: ProxyElevator, passenger: ProxyPassenger) -> None:
         self.waiting_requests.pop(passenger.id, None)
+        self.drop_targets[elevator.id][passenger.destination] += 1
         if self.debug:
             print(f"乘客 {passenger.id} 已乘坐电梯 {elevator.id}")
+        # 重新调度该电梯，优先送达车内乘客或继续接单
+        self._assign_next_target(elevator)
 
     def on_passenger_alight(self, elevator: ProxyElevator, passenger: ProxyPassenger, floor: ProxyFloor) -> None:
+        counter = self.drop_targets.get(elevator.id)
+        if counter and counter[passenger.destination] > 0:
+            counter[passenger.destination] -= 1
+            if counter[passenger.destination] <= 0:
+                del counter[passenger.destination]
         if self.debug:
             wait = self.last_known_tick - passenger.arrive_tick
             print(f"乘客 {passenger.id} 在 F{floor.floor} 下梯，总等待 {wait} tick")
@@ -204,6 +215,15 @@ class GreedyNearestController(ElevatorController):
             ):
                 elevator.go_to_floor(self.default_idle_floor)
             return
+        # 已经抵达呼叫楼层，等待乘客上车时无需重复派发相同楼层
+        if (
+            target == elevator.current_floor
+            and request is not None
+            and not elevator.passengers
+            and elevator.run_status.name.lower() == "stopped"
+        ):
+            request.assigned_elevator = elevator.id
+            return
         already_scheduled = self.dispatch_history[elevator.id][-1:] == [target]
         if already_scheduled and elevator.target_floor == target:
             return
@@ -217,10 +237,12 @@ class GreedyNearestController(ElevatorController):
 
     def _pick_next_destination(self, elevator: ProxyElevator) -> Tuple[Optional[int], Optional[PendingRequest]]:
         """计算电梯的下一目标楼层"""
-        pressed = elevator.pressed_floors
-        if pressed:
-            pressed.sort(key=lambda floor: abs(floor - elevator.current_floor))
-            return pressed[0], None
+        drop_counter = self.drop_targets.get(elevator.id, Counter())
+        if drop_counter:
+            candidates = [floor for floor, count in drop_counter.items() if count > 0]
+            if candidates:
+                candidates.sort(key=lambda floor: (abs(floor - elevator.current_floor), floor))
+                return candidates[0], None
         candidate = self._choose_waiting_request(elevator)
         if candidate:
             request = candidate

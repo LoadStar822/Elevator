@@ -34,78 +34,106 @@
       <div id="scenario-meta" class="scenario-meta">当前测试：--</div>
     </div>
     <main class="dashboard">
-      <section id="visual-section">
-        <h2>实时场景</h2>
-        <div id="visual-wrapper">
-          <div id="visual-controls" class="visual-controls">
-            <label for="stage-scale" class="control-label">缩放</label>
-            <input type="range" id="stage-scale" min="70" max="140" step="5" value="100" aria-label="场景缩放" />
-            <span id="stage-scale-value" class="control-value">100%</span>
-            <button id="viewport-reset" type="button" class="control-button" aria-label="重置视图">重置视图</button>
+      <section id="overview-section">
+        <div class="overview-grid">
+          <div class="overview-card">
+            <span class="overview-label">当前 Tick</span>
+            <div class="overview-value" id="overview-tick">--</div>
+            <span class="overview-hint" id="overview-update">上次更新：--</span>
           </div>
-          <div id="visual-viewport" class="visual-viewport">
-            <div id="visual-stage">
-              <div class="floor-axis">
-                <div class="axis-header">楼层</div>
-                <div class="floor-axis-body">
-                  <div id="floor-labels" class="floor-labels"></div>
-                </div>
-              </div>
-              <div class="visual-canvas">
-                <div class="stage-building" id="stage-building">
-                  <div class="building-backdrop"></div>
-                  <div id="floor-guides" class="floor-guides"></div>
-                  <div id="motion-layer" class="motion-layer"></div>
-                  <div id="shaft-container" class="shaft-container"></div>
-                </div>
-                <div class="stage-queue" id="stage-queue">
-                  <div class="queue-header">
-                    <span>候梯区</span>
-                    <small id="queue-summary" aria-live="polite">无乘客排队</small>
-                  </div>
-                  <div id="waiting-area" class="waiting-area"></div>
-                </div>
-              </div>
-            </div>
+          <div class="overview-card">
+            <span class="overview-label">调度状态</span>
+            <div class="overview-value" id="overview-status" data-state="idle">未运行</div>
+            <span class="overview-hint" id="overview-traffic">当前测试：--</span>
           </div>
-          <div class="legend">
-            <span class="legend-item legend-item-elevator">
-              <span class="legend-icon legend-elevator"></span> 电梯轿厢
-            </span>
-            <span class="legend-item legend-item-up">
-              <span class="legend-icon legend-passenger legend-passenger-up passenger-shape waiting-up"></span> 上行乘客
-            </span>
-            <span class="legend-item legend-item-down">
-              <span class="legend-icon legend-passenger legend-passenger-down passenger-shape waiting-down"></span> 下行乘客
-            </span>
-            <span class="legend-item legend-item-cabin">
-              <span class="legend-icon legend-passenger legend-passenger-cabin passenger-shape in-elevator"></span> 车内乘客
-            </span>
+          <div class="overview-card">
+            <span class="overview-label">候梯人数</span>
+            <div class="overview-value" id="overview-waiting">--</div>
+            <span class="overview-hint" id="overview-metrics">平均等候 -- tick</span>
+          </div>
+          <div class="overview-card">
+            <span class="overview-label">完成情况</span>
+            <div class="overview-value" id="overview-completed">--</div>
+            <span class="overview-hint" id="overview-completion-rate">完成率 --</span>
           </div>
         </div>
       </section>
-      <section id="elevator-section">
-        <h2>电梯状态</h2>
-        <div id="elevator-cards" class="card-container"></div>
-      </section>
-      <section id="floor-section">
-        <h2>楼层排队</h2>
-        <table id="floor-table">
-          <thead>
-            <tr>
-              <th>楼层</th>
-              <th>上行等待</th>
-              <th>下行等待</th>
-              <th>总计</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-      </section>
-      <section id="metrics-section">
-        <h2>关键指标</h2>
-        <ul id="metrics-list"></ul>
-      </section>
+      <div class="dashboard-main">
+        <section id="visual-section">
+          <h2>实时场景</h2>
+          <div id="visual-wrapper">
+            <div id="visual-controls" class="visual-controls">
+              <label for="stage-scale" class="control-label">缩放</label>
+              <input type="range" id="stage-scale" min="70" max="140" step="5" value="100" aria-label="场景缩放" />
+              <span id="stage-scale-value" class="control-value">100%</span>
+              <button id="viewport-reset" type="button" class="control-button" aria-label="重置视图">重置视图</button>
+            </div>
+            <div id="visual-viewport" class="visual-viewport">
+              <div id="visual-stage">
+                <div class="floor-axis">
+                  <div class="axis-header">楼层</div>
+                  <div class="floor-axis-body">
+                    <div id="floor-labels" class="floor-labels"></div>
+                  </div>
+                </div>
+                <div class="visual-canvas">
+                  <div class="stage-building" id="stage-building">
+                    <div class="building-backdrop"></div>
+                    <div id="floor-guides" class="floor-guides"></div>
+                    <div id="motion-layer" class="motion-layer"></div>
+                    <div id="shaft-container" class="shaft-container"></div>
+                  </div>
+                  <div class="stage-queue" id="stage-queue">
+                    <div class="queue-header">
+                      <span>候梯区</span>
+                      <small id="queue-summary" aria-live="polite">无乘客排队</small>
+                    </div>
+                    <div id="waiting-area" class="waiting-area"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="legend">
+              <span class="legend-item legend-item-elevator">
+                <span class="legend-icon legend-elevator"></span> 电梯轿厢
+              </span>
+              <span class="legend-item legend-item-up">
+                <span class="legend-icon legend-passenger legend-passenger-up passenger-shape waiting-up"></span> 上行乘客
+              </span>
+              <span class="legend-item legend-item-down">
+                <span class="legend-icon legend-passenger legend-passenger-down passenger-shape waiting-down"></span> 下行乘客
+              </span>
+              <span class="legend-item legend-item-cabin">
+                <span class="legend-icon legend-passenger legend-passenger-cabin passenger-shape in-elevator"></span> 车内乘客
+              </span>
+            </div>
+          </div>
+        </section>
+        <aside class="dashboard-sidebar">
+          <section id="elevator-section">
+            <h2>电梯状态</h2>
+            <div id="elevator-cards" class="card-container"></div>
+          </section>
+          <section id="floor-section">
+            <h2>楼层排队</h2>
+            <table id="floor-table">
+              <thead>
+                <tr>
+                  <th>楼层</th>
+                  <th>上行等待</th>
+                  <th>下行等待</th>
+                  <th>总计</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </section>
+          <section id="metrics-section">
+            <h2>关键指标</h2>
+            <ul id="metrics-list"></ul>
+          </section>
+        </aside>
+      </div>
     </main>
     <footer>
       <span>数据来源：http://127.0.0.1:8000</span>

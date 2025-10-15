@@ -10,27 +10,86 @@
 from __future__ import annotations
 
 import atexit
+import json
+import logging
 import os
 import subprocess
 import sys
 import threading
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from flask import Flask, jsonify, send_from_directory, request
-import logging
 
 from elevator_saga.client.api_client import ElevatorAPIClient
 from elevator_saga.core.models import PassengerStatus
+from elevator_saga.utils.debug import set_debug_mode
+
+set_debug_mode(False)
 
 app = Flask(__name__, static_folder=None)
 
 _controller_lock = threading.Lock()
 _controller_process: Optional[subprocess.Popen[bytes]] = None
 
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_BUILTIN_TRAFFIC_DIR = (_PROJECT_ROOT / "elevator_saga" / "traffic").resolve()
+_TRAFFIC_CATALOG_CACHE: Optional[List[Dict[str, object]]] = None
+
+
+def _extract_traffic_metadata(file_path: Path) -> Dict[str, object]:
+    metadata: Dict[str, object] = {
+        "filename": file_path.name,
+        "label": file_path.stem,
+        "source": "builtin",
+    }
+    try:
+        data = json.loads(file_path.read_text(encoding="utf-8"))
+        building = data.get("building", {}) or {}
+        label = building.get("description") or building.get("scenario")
+        if isinstance(label, str) and label.strip():
+            metadata["label"] = label.strip()
+        metadata.update(
+            {
+                "floors": building.get("floors"),
+                "elevators": building.get("elevators"),
+                "capacity": building.get("elevator_capacity"),
+                "duration": building.get("duration"),
+                "expected_passengers": building.get("expected_passengers"),
+                "scenario": building.get("scenario"),
+                "description": building.get("description"),
+                "scale": building.get("scale"),
+            }
+        )
+    except Exception as exc:  # pragma: no cover - 仅用于稳健性
+        app.logger.warning("无法解析测试用例元数据 %s: %s", file_path.name, exc)
+    return metadata
+
+
+def _load_traffic_catalog() -> List[Dict[str, object]]:
+    global _TRAFFIC_CATALOG_CACHE
+    if _TRAFFIC_CATALOG_CACHE is not None:
+        return _TRAFFIC_CATALOG_CACHE
+
+    catalog: List[Dict[str, object]] = []
+    if _BUILTIN_TRAFFIC_DIR.exists():
+        for json_file in sorted(_BUILTIN_TRAFFIC_DIR.glob("*.json")):
+            catalog.append(_extract_traffic_metadata(json_file))
+
+    for index, entry in enumerate(catalog):
+        entry["index"] = index
+
+    _TRAFFIC_CATALOG_CACHE = catalog
+    return catalog
+
+
+def _get_traffic_catalog_copy() -> List[Dict[str, object]]:
+    return [dict(entry) for entry in _load_traffic_catalog()]
+
 
 def _create_api_client() -> ElevatorAPIClient:
     """创建新的 API 客户端实例，避免缓存状态带来的过期数据"""
-    return ElevatorAPIClient("http://127.0.0.1:8000", verbose=False)
+    return ElevatorAPIClient("http://127.0.0.1:8000")
 
 
 def _controller_running() -> bool:
@@ -179,6 +238,10 @@ def _collect_state() -> Dict[str, object]:
     }
 
     traffic_info = client.get_traffic_info() or {}
+    catalog = _load_traffic_catalog()
+    current_index = traffic_info.get("current_index")
+    if isinstance(current_index, int) and 0 <= current_index < len(catalog):
+        traffic_info["current_file"] = dict(catalog[current_index])
 
     return {
         "tick": state.tick,
@@ -202,8 +265,12 @@ def dashboard_state() -> object:
 def dashboard_traffic_list() -> object:
     """返回测试用例列表"""
     client = _create_api_client()
-    catalog = client.get_traffic_catalog()
-    return jsonify(catalog)
+    info = client.get_traffic_info() or {}
+    catalog = _get_traffic_catalog_copy()
+    current_index = info.get("current_index")
+    if isinstance(current_index, int) and 0 <= current_index < len(catalog):
+        info["current_file"] = dict(catalog[current_index])
+    return jsonify({"traffic": catalog, "info": info})
 
 
 @app.route("/dashboard/traffic/select", methods=["POST"])
@@ -221,13 +288,27 @@ def dashboard_traffic_select() -> object:
     except (TypeError, ValueError):
         return jsonify({"success": False, "message": "缺少有效的测试用例编号。"}), 400
 
-    client = _create_api_client()
-    result = client.select_traffic(index)
-    if not result.get("success"):
-        message = result.get("error") or "切换测试用例失败。"
-        return jsonify({"success": False, "message": message}), 400
+    catalog = _load_traffic_catalog()
+    if not catalog:
+        return jsonify({"success": False, "message": "当前环境未找到可用测试用例。"}), 500
+    if index < 0 or index >= len(catalog):
+        return jsonify({"success": False, "message": "测试用例编号超出范围。"}), 400
 
-    return jsonify(result)
+    client = _create_api_client()
+    try:
+        if not client.select_traffic(index):
+            return jsonify({"success": False, "message": "切换到目标测试用例失败。"}), 500
+    except Exception as exc:  # pragma: no cover - 网络/模拟器异常
+        app.logger.exception("切换测试用例异常: %s", exc)
+        return jsonify({"success": False, "message": f"切换测试用例时发生异常: {exc}"}), 500
+
+    updated_info = client.get_traffic_info() or {}
+    updated_catalog = _get_traffic_catalog_copy()
+    new_index = updated_info.get("current_index")
+    if isinstance(new_index, int) and 0 <= new_index < len(updated_catalog):
+        updated_info["current_file"] = dict(updated_catalog[new_index])
+
+    return jsonify({"success": True, "info": updated_info, "traffic": updated_catalog})
 
 
 @app.route("/dashboard/start", methods=["POST"])

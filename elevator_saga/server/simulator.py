@@ -213,6 +213,16 @@ class ElevatorSimulation:
         self.load_current_traffic()  # 加载新的流量文件
         return True
 
+    def select_traffic_index(self, target_index: int) -> bool:
+        """根据索引直接切换测试用例"""
+        if not self.traffic_files:
+            return False
+        if target_index < 0 or target_index >= len(self.traffic_files):
+            return False
+        self.current_traffic_index = target_index
+        self.load_current_traffic()
+        return True
+
     def load_traffic(self, traffic_file: str) -> None:
         """Load passenger traffic from JSON file using unified data models"""
         with open(traffic_file, "r") as f:
@@ -285,16 +295,20 @@ class ElevatorSimulation:
         # 处于Stopped状态，方向也已经清空，说明没有调度。
         floor = self.floors[current_floor]
         passengers_to_board: List[int] = []
-        available_capacity = elevator.max_capacity - len(elevator.passengers)
+        remaining_capacity = elevator.max_capacity - len(elevator.passengers)
         # Board passengers going up (if up indicator is on or no direction set)
-        if elevator.target_floor_direction == Direction.UP:
-            passengers_to_board.extend(floor.up_queue[:available_capacity])
-            floor.up_queue = floor.up_queue[available_capacity:]
+        if remaining_capacity > 0 and elevator.target_floor_direction in (Direction.UP, Direction.STOPPED):
+            take_up = floor.up_queue[:remaining_capacity]
+            passengers_to_board.extend(take_up)
+            floor.up_queue = floor.up_queue[len(take_up) :]
+            remaining_capacity -= len(take_up)
 
         # Board passengers going down (if down indicator is on or no direction set)
-        if elevator.target_floor_direction == Direction.DOWN:
-            passengers_to_board.extend(floor.down_queue[:available_capacity])
-            floor.down_queue = floor.down_queue[available_capacity:]
+        if remaining_capacity > 0 and elevator.target_floor_direction in (Direction.DOWN, Direction.STOPPED):
+            take_down = floor.down_queue[:remaining_capacity]
+            passengers_to_board.extend(take_down)
+            floor.down_queue = floor.down_queue[len(take_down) :]
+            remaining_capacity -= len(take_down)
 
         # Process boarding
         for passenger_id in passengers_to_board:
@@ -696,6 +710,24 @@ def next_traffic_round() -> Response | tuple[Response, int]:
             return json_response({"success": True})
         else:
             return json_response({"success": False, "error": "No traffic files available"}, 400)
+    except Exception as e:
+        return json_response({"error": str(e)}, 500)
+
+
+@app.route("/api/traffic/select", methods=["POST"])
+def select_traffic() -> Response | tuple[Response, int]:
+    """根据索引切换指定流量文件"""
+    try:
+        data = request.get_json(silent=True) or {}
+        index_raw = data.get("index", -1)
+        try:
+            target_index = int(index_raw)
+        except (TypeError, ValueError):
+            return json_response({"success": False, "error": "Invalid traffic index"}, 400)
+        success = simulation.select_traffic_index(target_index)
+        if not success:
+            return json_response({"success": False, "error": "Traffic index out of range"}, 400)
+        return json_response({"success": True})
     except Exception as e:
         return json_response({"error": str(e)}, 500)
 

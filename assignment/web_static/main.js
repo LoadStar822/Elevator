@@ -8,6 +8,10 @@ const lastUpdateEl = document.getElementById("last-update");
 const floorLabelsEl = document.getElementById("floor-labels");
 const floorGuidesEl = document.getElementById("floor-guides");
 const waitingAreaEl = document.getElementById("waiting-area");
+const floorAxisEl = document.querySelector(".floor-axis");
+const floorAxisBodyEl = document.querySelector(".floor-axis-body");
+const stageQueueEl = document.getElementById("stage-queue");
+const queueHeaderEl = document.querySelector(".queue-header");
 const shaftContainer = document.getElementById("shaft-container");
 const motionLayer = document.getElementById("motion-layer");
 const visualCanvasEl = document.querySelector(".visual-canvas");
@@ -21,6 +25,14 @@ const stageScaleInput = document.getElementById("stage-scale");
 const stageScaleValueEl = document.getElementById("stage-scale-value");
 const viewportResetBtn = document.getElementById("viewport-reset");
 const queueSummaryEl = document.getElementById("queue-summary");
+const overviewTickEl = document.getElementById("overview-tick");
+const overviewStatusEl = document.getElementById("overview-status");
+const overviewWaitingEl = document.getElementById("overview-waiting");
+const overviewMetricsEl = document.getElementById("overview-metrics");
+const overviewTrafficEl = document.getElementById("overview-traffic");
+const overviewUpdateEl = document.getElementById("overview-update");
+const overviewCompletedEl = document.getElementById("overview-completed");
+const overviewCompletionRateEl = document.getElementById("overview-completion-rate");
 
 let controllerRunning = false;
 let pendingAction = false;
@@ -247,11 +259,12 @@ function updateElevatorSizing() {
   }
 
   const layout = sceneState.layout || {};
-  const unit = Number.isFinite(layout.floorUnit) ? layout.floorUnit : 42;
-  const computedCabin = Number.isFinite(layout.cabinHeight)
-    ? layout.cabinHeight
-    : Math.round(Math.max(18, Math.min(unit * 0.62, 52)));
-  sceneState.cabinHeightPx = computedCabin;
+  const unit = Number.isFinite(layout.floorUnit) && layout.floorUnit > 0 ? layout.floorUnit : 42;
+  let computedCabin = Number.isFinite(layout.cabinHeight) ? layout.cabinHeight : unit * 0.62;
+  const cabinUpper = Math.max(12, Math.min(unit - 4, 56));
+  const cabinLower = Math.max(12, Math.min(cabinUpper, unit * 0.45));
+  computedCabin = Math.max(cabinLower, Math.min(cabinUpper, computedCabin));
+  sceneState.cabinHeightPx = Math.round(computedCabin);
 
   elevatorNodes.forEach((node) => applyCabinSizing(node));
 
@@ -279,14 +292,14 @@ function applyCabinSizing(node) {
     node.cabin.style.height = "";
   }
   if (Number.isFinite(unit)) {
-    const width = Math.round(Math.max(44, Math.min(unit * 0.82, 68)));
+    const width = Math.round(Math.min(Math.max(unit * 0.9, 32), Math.max(44, unit * 1.1)));
     node.cabin.style.width = `${width}px`;
   } else {
     node.cabin.style.width = "";
   }
   if (node.interior) {
     if (typeof height === "number") {
-      const interiorHeight = Math.max(height - 26, 28);
+      const interiorHeight = Math.max(6, Math.min(Math.round(height * 0.72), Math.max(height - 6, 6)));
       node.interior.style.minHeight = `${interiorHeight}px`;
     } else {
       node.interior.style.minHeight = "";
@@ -294,7 +307,7 @@ function applyCabinSizing(node) {
   }
   if (node.passengersEl) {
     if (typeof height === "number") {
-      const usable = Math.max(height - 28, 20);
+      const usable = Math.max(6, Math.min(Math.round(height * 0.65), Math.max(height - 8, 6)));
       node.passengersEl.style.maxHeight = `${usable}px`;
     } else {
       node.passengersEl.style.maxHeight = "";
@@ -316,10 +329,11 @@ function cacheFloorCenters() {
   const unit = Number.isFinite(layout.floorUnit) ? layout.floorUnit : 40;
   const centers = new Map();
   const levels = new Map();
+  const travelHeight = Math.max((floorNumbers.length - 1) * unit, 0);
 
   floorNumbers.forEach((floor, index) => {
-    const boundary = index * unit;
-    const center = boundary + unit / 2;
+    const boundary = Math.min(travelHeight, index * unit);
+    const center = Math.min(travelHeight, boundary + unit / 2);
     levels.set(floor, boundary);
     centers.set(floor, center);
 
@@ -335,7 +349,6 @@ function cacheFloorCenters() {
     }
   });
 
-  const travelHeight = Math.max((floorNumbers.length - 1) * unit, 0);
   sceneState.floorPixelRange = { start: 0, end: travelHeight };
   sceneState.travelHeightPx = travelHeight;
   sceneState.shaftHeightPx = travelHeight;
@@ -506,6 +519,7 @@ function renderState(state) {
     return;
   }
   const currentTick = ensureNumber(state.tick, 0);
+  const running = Boolean(state.controller_running);
   if (previousTick !== null && currentTick < previousTick) {
     resetAnimationState();
   }
@@ -514,19 +528,56 @@ function renderState(state) {
     ? currentTick
     : state.tick ?? "--";
   tickEl.textContent = `Tick: ${tickDisplay}`;
+  const now = new Date();
+  const lastUpdateText = `上次更新：${now
+    .toLocaleTimeString("zh-CN", { hour12: false })
+    .padStart(8, "0")}`;
   if (lastUpdateEl) {
-    const now = new Date();
-    lastUpdateEl.textContent = `上次更新：${now
-      .toLocaleTimeString("zh-CN", { hour12: false })
-      .padStart(8, "0")}`;
+    lastUpdateEl.textContent = lastUpdateText;
+  }
+  if (overviewUpdateEl) {
+    overviewUpdateEl.textContent = lastUpdateText;
+  }
+  if (overviewTickEl) {
+    overviewTickEl.textContent = Number.isFinite(currentTick) ? String(currentTick) : "--";
+  }
+
+  const floors = Array.isArray(state.floors) ? state.floors : [];
+  const totalWaiting = floors.reduce(
+    (acc, floor) => acc + ensureNumber(floor.total ?? floor.total_waiting ?? 0, 0),
+    0
+  );
+  const metrics = state.metrics || {};
+  const averageWait = ensureNumber(metrics.average_floor_wait_time, 0);
+  const completedPassengers = ensureNumber(metrics.completed_passengers, 0);
+  const totalPassengers = ensureNumber(metrics.total_passengers, 0);
+
+  if (overviewStatusEl) {
+    overviewStatusEl.textContent = running ? "运行中" : "未运行";
+    overviewStatusEl.dataset.state = running ? "running" : "idle";
+  }
+  if (overviewWaitingEl) {
+    overviewWaitingEl.textContent = String(totalWaiting);
+  }
+  if (overviewMetricsEl) {
+    overviewMetricsEl.textContent = `平均等候 ${averageWait.toFixed(1)} tick`;
+  }
+  if (overviewCompletedEl) {
+    overviewCompletedEl.textContent =
+      totalPassengers > 0 ? `${completedPassengers}/${totalPassengers}` : String(completedPassengers);
+  }
+  if (overviewCompletionRateEl) {
+    const completionRate =
+      totalPassengers > 0 ? `完成率 ${(completedPassengers / totalPassengers * 100).toFixed(1)}%` : "完成率 --";
+    overviewCompletionRateEl.textContent = completionRate;
   }
 
   ensureSceneStructure(state);
   updateElevatorScene(state);
   updatePassengerVisuals(state.passengers || []);
   updateElevatorCards(state.elevators || []);
-  updateFloorTable(state.floors || []);
-  updateMetrics(state.metrics || {});
+  updateFloorTable(floors);
+  updateMetrics(metrics);
   if (state.traffic) {
     currentTrafficInfo = state.traffic;
     const activeIndex = getActiveScenarioIndex(currentTrafficInfo);
@@ -545,9 +596,16 @@ function renderState(state) {
       }
     }
     renderScenarioMeta(currentTrafficInfo);
+    if (overviewTrafficEl) {
+      const info = currentTrafficInfo.current_file || currentTrafficInfo;
+      const label = info?.label || info?.filename || "未选择";
+      overviewTrafficEl.textContent = `当前测试：${label}`;
+    }
+  } else if (overviewTrafficEl) {
+    overviewTrafficEl.textContent = "当前测试：--";
   }
 
-  controllerRunning = Boolean(state.controller_running);
+  controllerRunning = running;
   updateControls();
   previousTick = currentTick;
 }
@@ -667,27 +725,56 @@ function configureStageLayout(floorCount) {
   const floors = Math.max(floorCount, 1);
   const viewportHeight = visualViewportEl?.clientHeight ?? window.innerHeight ?? 760;
   const viewportWidth = visualViewportEl?.clientWidth ?? window.innerWidth ?? 1280;
-  const availableHeight = Math.max(viewportHeight - 260, 420);
-  let floorUnit = Math.round(availableHeight / Math.max(floors + 2, 8));
-  floorUnit = Math.max(18, Math.min(64, floorUnit));
+  const availableHeight = Math.max(viewportHeight - 280, 420);
+
+  const minUnit =
+    floors > 48 ? 16 : floors > 36 ? 18 : floors > 24 ? 22 : floors > 16 ? 26 : floors > 8 ? 32 : 36;
+  const maxUnit =
+    floors <= 3 ? 80 : floors <= 6 ? 72 : floors <= 12 ? 64 : floors <= 20 ? 58 : floors <= 32 ? 52 : 48;
+  let floorUnit = availableHeight / Math.max(floors + 2, 8);
+  floorUnit = Math.max(minUnit, Math.min(maxUnit, floorUnit));
   if (floors > 48) {
-    floorUnit = Math.max(16, Math.round(floorUnit * 0.82));
+    floorUnit = Math.max(16, floorUnit * 0.85);
   } else if (floors > 32) {
-    floorUnit = Math.max(17, Math.round(floorUnit * 0.88));
+    floorUnit = Math.max(minUnit, floorUnit * 0.9);
   } else if (floors > 20) {
-    floorUnit = Math.max(18, Math.round(floorUnit * 0.92));
+    floorUnit = Math.max(minUnit, floorUnit * 0.94);
+  }
+  floorUnit = Math.max(12, Math.round(floorUnit));
+
+  const cabinUpperBound = Math.max(14, Math.min(floorUnit - 4, 56));
+  const cabinLowerBound = Math.max(12, Math.min(cabinUpperBound, floorUnit * 0.45));
+  let cabinHeight = Math.min(Math.max(floorUnit * 0.62, cabinLowerBound), cabinUpperBound);
+  cabinHeight = Math.max(12, Math.round(Math.min(cabinHeight, cabinUpperBound)));
+
+  let paddingTop = Math.max(Math.round(cabinHeight + 26), Math.round(floorUnit * 1.12));
+  let paddingBottom = Math.max(20, Math.round(Math.max(cabinHeight * 0.9, floorUnit * 0.5)));
+  const buildingPaddingX = Math.max(22, Math.round(30 - Math.min(elevatorCount, 6) * 2));
+  const shaftPadding = buildingPaddingX + Math.max(14, Math.round(11 + Math.min(elevatorCount, 6)));
+  const queueBase = 180 + elevatorCount * 14;
+  const queueMax = Math.max(240, Math.min(360, Math.round(viewportWidth * 0.24)));
+  const queueWidth = Math.round(Math.min(queueMax, Math.max(200, queueBase)));
+
+  const travelHeight = Math.max(floors - 1, 0) * floorUnit;
+  const minStageHeight = Math.max(520, Math.round(viewportHeight * 0.6));
+  let stageHeight = Math.max(travelHeight + paddingTop + paddingBottom, minStageHeight);
+  const targetPadding = stageHeight - travelHeight;
+  const basePadding = paddingTop + paddingBottom;
+  if (targetPadding > basePadding) {
+    const extra = targetPadding - basePadding;
+    const topExtra = Math.round(extra * 0.6);
+    const bottomExtra = Math.round(extra - topExtra);
+    paddingTop += topExtra;
+    paddingBottom += bottomExtra;
+    const padDelta = targetPadding - (paddingTop + paddingBottom);
+    if (Math.abs(padDelta) >= 1) {
+      paddingBottom += Math.round(padDelta);
+    }
   }
 
-  const cabinHeight = Math.round(Math.max(18, Math.min(floorUnit * 0.62, 52)));
-  const paddingBottom = Math.max(20, Math.round(cabinHeight * 0.9));
-  const paddingTop = Math.max(cabinHeight + 24, Math.round(floorUnit * 1.1));
-  const buildingPaddingX = Math.max(22, Math.round(30 - Math.min(elevatorCount, 6) * 2));
-  const shaftPadding = buildingPaddingX + Math.max(14, Math.round(10 + Math.min(elevatorCount, 6)));
-  const queueBase = 180 + elevatorCount * 14;
-  const queueMax = Math.max(240, Math.min(340, Math.round(viewportWidth * 0.22)));
-  const queueWidth = Math.round(Math.min(queueMax, Math.max(200, queueBase)));
-  const travelHeight = Math.max(floors - 1, 0) * floorUnit;
-  const stageHeight = Math.max(travelHeight + paddingTop + paddingBottom, 520);
+  const effectiveTravel = Math.max(0, stageHeight - paddingTop - paddingBottom);
+  const effectiveUnit =
+    floors > 1 ? Math.max(1, effectiveTravel / (floors - 1)) : Math.max(floorUnit, Math.round(cabinHeight + 16));
 
   layout.paddingTop = paddingTop;
   layout.paddingBottom = paddingBottom;
@@ -695,26 +782,51 @@ function configureStageLayout(floorCount) {
   layout.shaftPaddingLeft = shaftPadding;
   layout.shaftPaddingRight = shaftPadding;
   layout.queueWidth = queueWidth;
-  layout.floorUnit = floorUnit;
+  layout.floorUnit = effectiveUnit;
   layout.cabinHeight = cabinHeight;
 
   sceneState.stageHeightPx = stageHeight;
-  sceneState.travelHeightPx = travelHeight;
-  sceneState.floorPixelRange = { start: 0, end: travelHeight };
+  sceneState.travelHeightPx = effectiveTravel;
+  sceneState.floorPixelRange = { start: 0, end: effectiveTravel };
   sceneState.cabinHeightPx = cabinHeight;
 
   if (visualCanvasEl) {
-    visualCanvasEl.style.setProperty("--floor-padding-top", `${layout.paddingTop}px`);
-    visualCanvasEl.style.setProperty("--floor-padding-bottom", `${layout.paddingBottom}px`);
-    visualCanvasEl.style.setProperty("--building-padding-x", `${layout.buildingPaddingX}px`);
-    visualCanvasEl.style.setProperty("--shaft-padding-left", `${layout.shaftPaddingLeft}px`);
-    visualCanvasEl.style.setProperty("--shaft-padding-right", `${layout.shaftPaddingRight}px`);
-    visualCanvasEl.style.setProperty("--queue-width", `${layout.queueWidth}px`);
-    visualCanvasEl.style.setProperty("--floor-unit", `${layout.floorUnit}px`);
+    visualCanvasEl.style.minHeight = `${stageHeight}px`;
   }
+  const layoutTargets = [
+    visualCanvasEl,
+    visualStageEl,
+    waitingAreaEl,
+    stageQueueEl,
+    floorAxisEl,
+    floorAxisBodyEl,
+    shaftContainer,
+    motionLayer,
+    floorGuidesEl,
+    floorLabelsEl,
+  ].filter(Boolean);
+  layoutTargets.forEach((node) => {
+    node.style.setProperty("--floor-padding-top", `${layout.paddingTop}px`);
+    node.style.setProperty("--floor-padding-bottom", `${layout.paddingBottom}px`);
+    node.style.setProperty("--building-padding-x", `${layout.buildingPaddingX}px`);
+    node.style.setProperty("--shaft-padding-left", `${layout.shaftPaddingLeft}px`);
+    node.style.setProperty("--shaft-padding-right", `${layout.shaftPaddingRight}px`);
+    node.style.setProperty("--queue-width", `${layout.queueWidth}px`);
+    node.style.setProperty("--floor-unit", `${layout.floorUnit.toFixed(2)}px`);
+  });
+  updateQueueHeadroom();
   if (visualStageEl) {
     visualStageEl.style.minHeight = `${stageHeight}px`;
   }
+}
+
+function updateQueueHeadroom() {
+  if (!stageQueueEl) {
+    return;
+  }
+  const headerHeight = queueHeaderEl ? queueHeaderEl.offsetHeight : 0;
+  const headroom = Math.max(0, headerHeight);
+  stageQueueEl.style.setProperty("--queue-headroom", `${headroom}px`);
 }
 
 function resizeStageHeight(floorCount) {
@@ -961,16 +1073,17 @@ function updateElevatorVisual(node, elevator) {
 }
 
 function updatePassengerVisuals(passengers) {
-  if (!waitingAreaEl) {
-    return;
-  }
   const passengerList = Array.isArray(passengers) ? passengers : [];
   const waitingMap = new Map();
   const elevatorMap = new Map();
   const seenIds = new Set();
-  const layerRect = motionLayer ? motionLayer.getBoundingClientRect() : null;
   let totalWaitingUp = 0;
   let totalWaitingDown = 0;
+  if (!waitingAreaEl) {
+    passengerRegistry.clear();
+    return;
+  }
+  const layerRect = motionLayer ? motionLayer.getBoundingClientRect() : null;
 
   passengerList.forEach((raw) => {
     const snapshot = normalizePassengerSnapshot(raw);
@@ -978,12 +1091,11 @@ function updatePassengerVisuals(passengers) {
       return;
     }
 
-     // 取消的乘客直接从可视化中移除
+    // 取消的乘客直接从可视化中移除
     if (snapshot.status === "cancelled") {
       passengerRegistry.delete(snapshot.id);
       return;
     }
-
     seenIds.add(snapshot.id);
     const prev = passengerRegistry.get(snapshot.id);
     if (prev) {
@@ -1045,6 +1157,7 @@ function updatePassengerVisuals(passengers) {
       queueSummaryEl.classList.add("has-data");
     }
   }
+  updateQueueHeadroom();
 }
 
 function updateElevatorCards(elevators) {
@@ -1142,10 +1255,25 @@ function normalizePassengerSnapshot(raw) {
 }
 
 function handlePassengerTransition(prev, next, layerRect) {
-  if (!layerRect || !motionLayer || prev.status === next.status) {
+  if (!next || !motionLayer) {
     return;
   }
-  if (prev.status === "waiting" && next.status === "in_elevator" && next.elevator !== null) {
+  const statusChanged = prev?.status !== next.status;
+  const elevatorChanged = prev?.elevator !== next.elevator;
+  const queueChanged = prev?.origin !== next.origin || prev?.directionKey !== next.directionKey;
+  const hasPrev = Boolean(prev);
+  const shouldAnimateBoard =
+    hasPrev &&
+    next.status === "in_elevator" &&
+    next.elevator !== null &&
+    (prev.status === "waiting" || elevatorChanged || queueChanged);
+  const shouldAnimateAlight =
+    hasPrev && prev.status === "in_elevator" && next.status === "completed" && prev.elevator !== null;
+  if (!statusChanged && !shouldAnimateBoard && !shouldAnimateAlight) {
+    return;
+  }
+  const layerRectSafe = layerRect || motionLayer.getBoundingClientRect();
+  if (shouldAnimateBoard && prev) {
     const floorEntry = waitingNodes.get(prev.origin);
     const queueEl = floorEntry ? floorEntry[prev.directionKey] : null;
     const elevatorNode = elevatorNodes.get(next.elevator);
@@ -1189,8 +1317,10 @@ function handlePassengerTransition(prev, next, layerRect) {
         }, Math.max(360, Math.round(900 / Math.max(currentSpeedFactor, 0.25))));
       }
       const doorTarget =
-        elevatorNode.doors && layerRect ? getElementCenterRelative(elevatorNode.doors, layerRect) : null;
-      spawnPassengerGhost(queueEl, elevatorNode.cabin, `waiting-${prev.directionKey}`, "boarding", layerRect, {
+        elevatorNode.doors && layerRectSafe
+          ? getElementCenterRelative(elevatorNode.doors, layerRectSafe)
+          : null;
+      spawnPassengerGhost(queueEl, elevatorNode.cabin, `waiting-${prev.directionKey}`, "boarding", layerRectSafe, {
         duration: 820 + Math.random() * 220,
         startOffset: { x: (Math.random() - 0.5) * 14, y: -8 + Math.random() * 8 },
         endOffset: { x: (Math.random() - 0.5) * 12, y: -16 + Math.random() * 12 },
@@ -1198,7 +1328,7 @@ function handlePassengerTransition(prev, next, layerRect) {
         endOpacity: 0.06,
       });
     }
-  } else if (prev.status === "in_elevator" && next.status === "completed" && prev.elevator !== null) {
+  } else if (shouldAnimateAlight && prev) {
     const elevatorNode = elevatorNodes.get(prev.elevator);
     const floorEntry = waitingNodes.get(next.destination);
     if (elevatorNode && floorEntry) {
@@ -1241,8 +1371,10 @@ function handlePassengerTransition(prev, next, layerRect) {
         }, Math.max(360, Math.round(900 / Math.max(currentSpeedFactor, 0.25))));
       }
       const doorTarget =
-        elevatorNode.doors && layerRect ? getElementCenterRelative(elevatorNode.doors, layerRect) : null;
-      spawnPassengerGhost(elevatorNode.cabin, floorEntry.root, "departing", "departing", layerRect, {
+        elevatorNode.doors && layerRectSafe
+          ? getElementCenterRelative(elevatorNode.doors, layerRectSafe)
+          : null;
+      spawnPassengerGhost(elevatorNode.cabin, floorEntry.root, "departing", "departing", layerRectSafe, {
         duration: 920 + Math.random() * 240,
         startOffset: { x: (Math.random() - 0.5) * 22, y: -12 + Math.random() * 10 },
         endOffset: { x: (Math.random() - 0.5) * 38, y: (Math.random() - 0.5) * 30 },
@@ -1253,7 +1385,7 @@ function handlePassengerTransition(prev, next, layerRect) {
   } else if (prev.status === "waiting" && next.status === "completed") {
     const floorEntry = waitingNodes.get(next.destination);
     if (floorEntry) {
-      spawnPassengerGhost(floorEntry.root, floorEntry.root, "departing", "departing", layerRect, {
+      spawnPassengerGhost(floorEntry.root, floorEntry.root, "departing", "departing", layerRectSafe, {
         duration: 520,
         endOffset: { x: (Math.random() - 0.5) * 20, y: -14 + Math.random() * 6 },
         endOpacity: 0,
@@ -1799,10 +1931,18 @@ if (toggleBtn) {
   });
 }
 
-window.addEventListener("resize", () => requestElevatorSizeUpdate());
+window.addEventListener("resize", () => {
+  requestElevatorSizeUpdate();
+  updateQueueHeadroom();
+});
+window.addEventListener("load", updateQueueHeadroom);
+if (document.fonts?.ready) {
+  document.fonts.ready.then(() => updateQueueHeadroom());
+}
 
 initializeStageControls();
 initializeSpeedControls();
+updateQueueHeadroom();
 startPolling(false);
 fetchTrafficCatalog();
 fetchState();
