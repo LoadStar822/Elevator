@@ -236,6 +236,8 @@ def _collect_state() -> Dict[str, object]:
         "average_arrival_wait_time": _average(arrival_waits),
         "p95_arrival_wait_time": _percentile(arrival_waits, 0.95),
     }
+    metrics["total_energy_consumption"] = getattr(state.metrics, "total_energy_consumption", 0.0)
+    metrics["energy_per_completed_passenger"] = getattr(state.metrics, "energy_per_completed_passenger", 0.0)
 
     traffic_info = client.get_traffic_info() or {}
     catalog = _load_traffic_catalog()

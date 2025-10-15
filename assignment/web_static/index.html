@@ -70,46 +70,49 @@
             </div>
             <div id="visual-viewport" class="visual-viewport">
               <div id="visual-stage">
-                <div class="floor-axis">
-                  <div class="axis-header">楼层</div>
-                  <div class="floor-axis-body">
-                    <div id="floor-labels" class="floor-labels"></div>
-                  </div>
-                </div>
                 <div class="visual-canvas">
-                  <div class="stage-building" id="stage-building">
-                    <div class="building-backdrop"></div>
-                    <div id="floor-guides" class="floor-guides"></div>
-                    <div id="motion-layer" class="motion-layer"></div>
-                    <div id="shaft-container" class="shaft-container"></div>
-                  </div>
-                  <div class="stage-queue" id="stage-queue">
-                    <div class="queue-header">
-                      <span>候梯区</span>
-                      <small id="queue-summary" aria-live="polite">无乘客排队</small>
+                  <div class="scene-wrapper" id="scene-wrapper">
+                    <div class="scene-stage" id="scene-stage">
+                      <div class="scene-backdrop"></div>
+                      <div class="scene-floor-lines" id="scene-floor-lines"></div>
+                      <div class="scene-elevator-layer" id="scene-elevator-layer"></div>
+                      <div class="scene-legend-inline">
+                        <span class="legend-chip legend-up">↑ 上行</span>
+                        <span class="legend-chip legend-down">↓ 下行</span>
+                        <span class="legend-chip legend-cabin">◈ 车内</span>
+                      </div>
                     </div>
-                    <div id="waiting-area" class="waiting-area"></div>
                   </div>
+                  <aside class="scene-panel" id="scene-panel">
+                    <header class="scene-panel-header">
+                      <span>候梯情况</span>
+                      <small id="queue-summary" aria-live="polite">无乘客排队</small>
+                    </header>
+                    <div class="scene-panel-body" id="scene-panel-body"></div>
+                    <footer class="scene-panel-footer">
+                      <span class="queue-hint">提示：高亮楼层代表当前有乘客进出</span>
+                    </footer>
+                  </aside>
                 </div>
               </div>
             </div>
-            <div class="legend">
-              <span class="legend-item legend-item-elevator">
-                <span class="legend-icon legend-elevator"></span> 电梯轿厢
-              </span>
-              <span class="legend-item legend-item-up">
-                <span class="legend-icon legend-passenger legend-passenger-up passenger-shape waiting-up"></span> 上行乘客
-              </span>
-              <span class="legend-item legend-item-down">
-                <span class="legend-icon legend-passenger legend-passenger-down passenger-shape waiting-down"></span> 下行乘客
-              </span>
-              <span class="legend-item legend-item-cabin">
-                <span class="legend-icon legend-passenger legend-passenger-cabin passenger-shape in-elevator"></span> 车内乘客
-              </span>
-            </div>
+          </div>
+          <div class="legend">
+            <span class="legend-item">
+              <span class="legend-swatch legend-elevator-swatch"></span> 电梯轿厢
+            </span>
+            <span class="legend-item">
+              <span class="legend-swatch legend-up-swatch"></span> 上行等待
+            </span>
+            <span class="legend-item">
+              <span class="legend-swatch legend-down-swatch"></span> 下行等待
+            </span>
+            <span class="legend-item">
+              <span class="legend-swatch legend-cabin-swatch"></span> 车内乘客
+            </span>
           </div>
         </section>
-        <aside class="dashboard-sidebar">
+        <div class="data-panels">
           <section id="elevator-section">
             <h2>电梯状态</h2>
             <div id="elevator-cards" class="card-container"></div>
@@ -132,7 +135,7 @@
             <h2>关键指标</h2>
             <ul id="metrics-list"></ul>
           </section>
-        </aside>
+        </div>
       </div>
     </main>
     <footer>

@@ -3,33 +3,35 @@
     "floors": 10,
     "elevators": 2,
     "elevator_capacity": 10,
-    "duration": 900,
-    "scenario": "测试用例 - 2 电梯， 多人从同一层请求去不同的楼层",
-    "description": "测试用例 - 2 电梯， 多人从同一层请求去不同的楼层"
+    "scenario": "icssdj_morning_up",
+    "scale": "medium",
+    "description": "22人从0层上行至1-9层，模拟早高峰",
+    "expected_passengers": 22,
+    "duration": 500
   },
   "traffic": [
     {
       "id": 1,
       "origin": 0,
-      "destination": 8,
+      "destination": 1,
       "tick": 0
     },
     {
       "id": 2,
       "origin": 0,
-      "destination": 4,
+      "destination": 2,
       "tick": 0
     },
     {
       "id": 3,
       "origin": 0,
-      "destination": 6,
+      "destination": 3,
       "tick": 0
     },
     {
       "id": 4,
       "origin": 0,
-      "destination": 2,
+      "destination": 4,
       "tick": 0
     },
     {
@@ -41,103 +43,103 @@
     {
       "id": 6,
       "origin": 0,
-      "destination": 7,
+      "destination": 6,
       "tick": 0
     },
     {
       "id": 7,
       "origin": 0,
-      "destination": 9,
+      "destination": 7,
       "tick": 0
     },
     {
       "id": 8,
       "origin": 0,
-      "destination": 1,
+      "destination": 8,
       "tick": 0
     },
     {
       "id": 9,
       "origin": 0,
-      "destination": 6,
+      "destination": 9,
       "tick": 0
     },
     {
       "id": 10,
       "origin": 0,
-      "destination": 3,
+      "destination": 1,
       "tick": 0
     },
     {
       "id": 11,
       "origin": 0,
-      "destination": 8,
+      "destination": 2,
       "tick": 0
     },
     {
       "id": 12,
       "origin": 0,
-      "destination": 7,
+      "destination": 3,
       "tick": 0
     },
     {
       "id": 13,
       "origin": 0,
-      "destination": 5,
+      "destination": 4,
       "tick": 0
     },
     {
       "id": 14,
       "origin": 0,
-      "destination": 2,
+      "destination": 5,
       "tick": 0
     },
     {
       "id": 15,
       "origin": 0,
-      "destination": 4,
+      "destination": 6,
       "tick": 0
     },
     {
       "id": 16,
       "origin": 0,
-      "destination": 9,
+      "destination": 7,
       "tick": 0
     },
     {
       "id": 17,
       "origin": 0,
-      "destination": 6,
+      "destination": 8,
       "tick": 0
     },
     {
       "id": 18,
       "origin": 0,
-      "destination": 8,
+      "destination": 9,
       "tick": 0
     },
     {
       "id": 19,
       "origin": 0,
-      "destination": 3,
+      "destination": 5,
       "tick": 0
     },
     {
       "id": 20,
       "origin": 0,
-      "destination": 7,
+      "destination": 6,
       "tick": 0
     },
     {
       "id": 21,
       "origin": 0,
-      "destination": 5,
+      "destination": 7,
       "tick": 0
     },
     {
       "id": 22,
       "origin": 0,
-      "destination": 9,
+      "destination": 8,
       "tick": 0
     }
   ]

@@ -337,7 +337,8 @@ class PerformanceMetrics(SerializableModel):
     p95_floor_wait_time: float = 0.0
     average_arrival_wait_time: float = 0.0
     p95_arrival_wait_time: float = 0.0
-    # total_energy_consumption: float = 0.0
+    total_energy_consumption: float = 0.0
+    energy_per_completed_passenger: float = 0.0
 
     @property
     def completion_rate(self) -> float:

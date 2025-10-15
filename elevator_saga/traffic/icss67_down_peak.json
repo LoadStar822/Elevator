@@ -3,9 +3,11 @@
     "floors": 10,
     "elevators": 2,
     "elevator_capacity": 10,
-    "duration": 600,
-    "scenario": "测试用例 - 2 电梯 + 18 乘客同时请求",
-    "description": "测试用例 - 2 电梯 + 18 乘客同时请求"
+    "scenario": "icss67_down_peak",
+    "scale": "small",
+    "description": "18乘客同时请求，9-1层各两人下行至0层",
+    "expected_passengers": 18,
+    "duration": 500
   },
   "traffic": [
     {

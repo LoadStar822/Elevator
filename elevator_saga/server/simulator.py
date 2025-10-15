@@ -399,6 +399,11 @@ class ElevatorSimulation:
             else:
                 # 之前的状态已经是到站了，清空上一次到站的方向
                 pass
+            new_position = elevator.position.current_floor_float
+            if new_position != old_position and elevator.target_floor_direction != Direction.STOPPED:
+                elevator.energy_consumed += self._calculate_step_energy_cost(
+                    elevator, movement_speed, old_position, new_position
+                )
 
             # 发送电梯移动事件
             if elevator.target_floor_direction != Direction.STOPPED:
@@ -450,6 +455,16 @@ class ElevatorSimulation:
                     EventType.STOPPED_AT_FLOOR, {"elevator": elevator.id, "floor": new_floor, "reason": "move_reached"}
                 )
             # elevator.energy_consumed += abs(direction * elevator.speed_pre_tick) * 0.5
+
+    @staticmethod
+    def _calculate_step_energy_cost(
+        elevator: ElevatorState, movement_speed: int, old_position: float, new_position: float
+    ) -> float:
+        """根据单个tick的移动估算能耗"""
+        if movement_speed <= 0 or new_position == old_position:
+            return 0.0
+        base_cost = 2.0 if elevator.id == 3 else 1.0
+        return base_cost
 
     def _process_elevator_stops(self) -> None:
         """
@@ -575,10 +590,13 @@ class ElevatorSimulation:
                 p95_floor_wait_time=0,
                 average_arrival_wait_time=0,
                 p95_arrival_wait_time=0,
+                total_energy_consumption=0.0,
+                energy_per_completed_passenger=0.0,
             )
 
         floor_wait_times = [float(p.floor_wait_time) for p in completed]
         arrival_wait_times = [float(p.arrival_wait_time) for p in completed]
+        total_energy = sum(e.energy_consumed for e in self.elevators)
 
         def average_excluding_top_percent(data: List[float], exclude_percent: int) -> float:
             """计算排除掉最长的指定百分比后的平均值"""
@@ -600,6 +618,8 @@ class ElevatorSimulation:
             p95_floor_wait_time=average_excluding_top_percent(floor_wait_times, 5),
             average_arrival_wait_time=sum(arrival_wait_times) / len(arrival_wait_times) if arrival_wait_times else 0,
             p95_arrival_wait_time=average_excluding_top_percent(arrival_wait_times, 5),
+            total_energy_consumption=total_energy,
+            energy_per_completed_passenger=total_energy / len(completed) if completed else 0.0,
         )
 
     def get_events(self, since_tick: int = 0) -> List[SimulationEvent]:

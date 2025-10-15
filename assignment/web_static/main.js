@@ -5,18 +5,6 @@ const metricsList = document.getElementById("metrics-list");
 const statusEl = document.getElementById("controller-status");
 const toggleBtn = document.getElementById("toggle-controller");
 const lastUpdateEl = document.getElementById("last-update");
-const floorLabelsEl = document.getElementById("floor-labels");
-const floorGuidesEl = document.getElementById("floor-guides");
-const waitingAreaEl = document.getElementById("waiting-area");
-const floorAxisEl = document.querySelector(".floor-axis");
-const floorAxisBodyEl = document.querySelector(".floor-axis-body");
-const stageQueueEl = document.getElementById("stage-queue");
-const queueHeaderEl = document.querySelector(".queue-header");
-const shaftContainer = document.getElementById("shaft-container");
-const motionLayer = document.getElementById("motion-layer");
-const visualCanvasEl = document.querySelector(".visual-canvas");
-const visualStageEl = document.getElementById("visual-stage");
-const visualViewportEl = document.getElementById("visual-viewport");
 const scenarioSelect = document.getElementById("scenario-select");
 const applyScenarioBtn = document.getElementById("apply-scenario");
 const scenarioMetaEl = document.getElementById("scenario-meta");
@@ -24,6 +12,7 @@ const speedControlsEl = document.getElementById("speed-controls");
 const stageScaleInput = document.getElementById("stage-scale");
 const stageScaleValueEl = document.getElementById("stage-scale-value");
 const viewportResetBtn = document.getElementById("viewport-reset");
+const visualViewportEl = document.getElementById("visual-viewport");
 const queueSummaryEl = document.getElementById("queue-summary");
 const overviewTickEl = document.getElementById("overview-tick");
 const overviewStatusEl = document.getElementById("overview-status");
@@ -33,50 +22,757 @@ const overviewTrafficEl = document.getElementById("overview-traffic");
 const overviewUpdateEl = document.getElementById("overview-update");
 const overviewCompletedEl = document.getElementById("overview-completed");
 const overviewCompletionRateEl = document.getElementById("overview-completion-rate");
+const sceneWrapperEl = document.getElementById("scene-wrapper");
+const sceneAxisShellEl = document.querySelector(".scene-axis-shell");
+const sceneStageEl = document.getElementById("scene-stage");
+const sceneFloorLinesEl = document.getElementById("scene-floor-lines");
+const sceneAxisEl = document.getElementById("scene-axis");
+const sceneElevatorLayerEl = document.getElementById("scene-elevator-layer");
+const scenePanelBodyEl = document.getElementById("scene-panel-body");
+
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function ensureNumber(value, fallback = 0) {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function arraysEqual(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b)) {
+    return false;
+  }
+  if (a.length !== b.length) {
+    return false;
+  }
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+class StageRenderer {
+  constructor({ wrapperEl, stageEl, floorLinesEl, axisShellEl, axisEl, elevatorLayerEl, panelBodyEl, summaryEl }) {
+    this.wrapperEl = wrapperEl;
+    this.stageEl = stageEl;
+    this.floorLinesEl = floorLinesEl;
+    this.axisShellEl = axisShellEl;
+    this.axisEl = axisEl;
+    this.elevatorLayerEl = elevatorLayerEl;
+    this.panelBodyEl = panelBodyEl;
+    this.summaryEl = summaryEl;
+    this.layout = null;
+    this.floorEntries = new Map();
+    this.elevatorNodes = new Map();
+    this.lastFloors = null;
+    this.lastElevators = null;
+    this.lastSummary = null;
+    this.floorRatioMap = new Map();
+    this.prevPassengerCount = new Map();
+    this.passengerAnimTimers = new Map();
+  }
+
+  buildFloorLines() {
+    if (!this.layout || !this.floorLinesEl) {
+      return;
+    }
+    this.floorLinesEl.innerHTML = "";
+    const floors = this.layout.floorNumbers;
+    floors.forEach((floor, index) => {
+      const bottom = this.getBottomForValue(floor);
+      const line = document.createElement("div");
+      line.className = "scene-floor-line";
+      if (floors.length === 1) {
+        line.classList.add("scene-floor-line-ground", "scene-floor-line-top");
+      } else if (index === floors.length - 1) {
+        line.classList.add("scene-floor-line-top");
+      } else if (index === 0) {
+        line.classList.add("scene-floor-line-ground");
+      }
+      line.dataset.floor = String(floor);
+      line.style.bottom = `${bottom}px`;
+      this.floorLinesEl.appendChild(line);
+      const entry = this.floorEntries.get(floor);
+      if (entry) {
+        entry.line = line;
+      } else {
+        this.floorEntries.set(floor, { line });
+      }
+    });
+  }
+
+  reset() {
+    this.layout = null;
+    this.floorRatioMap = new Map();
+    this.floorEntries.clear();
+    this.elevatorNodes.clear();
+    this.lastFloors = null;
+    this.lastElevators = null;
+    this.lastSummary = null;
+    if (this.axisEl) {
+      this.axisEl.innerHTML = "";
+      this.axisEl.style.height = "";
+    }
+    if (this.axisShellEl) {
+      this.axisShellEl.style.minHeight = "";
+      this.axisShellEl.style.height = "";
+    }
+    if (this.panelBodyEl) {
+      this.panelBodyEl.innerHTML = "";
+    }
+    if (this.elevatorLayerEl) {
+      this.elevatorLayerEl.innerHTML = "";
+    }
+    if (this.floorLinesEl) {
+      this.floorLinesEl.innerHTML = "";
+      this.floorLinesEl.style.removeProperty("--floor-count");
+    }
+    if (this.summaryEl) {
+      this.summaryEl.textContent = "无乘客排队";
+      this.summaryEl.classList.remove("has-data");
+    }
+  }
+
+  render({ floors, elevators, summary }) {
+    const floorSnapshots = Array.isArray(floors) ? floors.map((item) => ({ ...item })) : [];
+    const elevatorSnapshots = Array.isArray(elevators) ? elevators.map((item) => ({ ...item })) : [];
+    this.lastFloors = floorSnapshots;
+    this.lastElevators = elevatorSnapshots;
+    if (summary) {
+      this.lastSummary = {
+        up: ensureNumber(summary.up, 0),
+        down: ensureNumber(summary.down, 0),
+      };
+    }
+    this.ensureLayout(floorSnapshots, elevatorSnapshots);
+    this.updateFloors(floorSnapshots);
+    this.updateElevators(elevatorSnapshots);
+    if (summary) {
+      this.updateSummary(summary.up, summary.down);
+    } else if (this.lastSummary) {
+      this.updateSummary(this.lastSummary.up, this.lastSummary.down);
+    }
+  }
+
+  handleResize() {
+    if (!this.lastFloors && !this.lastElevators) {
+      return;
+    }
+    const floorSnapshots = this.lastFloors ? this.lastFloors.map((item) => ({ ...item })) : [];
+    const elevatorSnapshots = this.lastElevators ? this.lastElevators.map((item) => ({ ...item })) : [];
+    const summarySnapshot = this.lastSummary ? { ...this.lastSummary } : null;
+    this.layout = null;
+    this.ensureLayout(floorSnapshots, elevatorSnapshots);
+    this.updateFloors(floorSnapshots);
+    this.updateElevators(elevatorSnapshots);
+    if (summarySnapshot) {
+      this.updateSummary(summarySnapshot.up, summarySnapshot.down);
+    }
+  }
+
+  ensureLayout(floors, elevators) {
+    const floorNumbers = floors
+      .map((item) => ensureNumber(item.floor, Number.NaN))
+      .filter((value, index, arr) => Number.isFinite(value) && arr.indexOf(value) === index)
+      .sort((a, b) => a - b);
+    const elevatorCount = Array.isArray(elevators) ? elevators.length : 0;
+
+    if (this.layout && arraysEqual(this.layout.floorNumbers, floorNumbers) && this.layout.elevatorCount === elevatorCount) {
+      return;
+    }
+
+    this.layout = this.calculateLayout(floorNumbers, elevatorCount);
+    this.floorRatioMap = this.layout.floorRatios ?? new Map();
+    this.applyLayout();
+    this.buildAxis();
+    this.buildFloorLines();
+    this.buildElevatorLanes(elevators);
+  }
+
+  calculateLayout(floorNumbers, elevatorCount) {
+    const effectiveFloors = floorNumbers.length ? floorNumbers : [0];
+    const minFloor = effectiveFloors[0];
+    const maxFloor = effectiveFloors[effectiveFloors.length - 1];
+    const floorCount = effectiveFloors.length;
+    const floorSpan = Math.max(maxFloor - minFloor, floorCount > 1 ? floorCount - 1 : 1);
+
+    const containerHeight =
+      this.wrapperEl?.clientHeight ?? this.stageEl?.clientHeight ?? window.innerHeight ?? 720;
+    const targetInner = clamp(Math.round(containerHeight * 0.55), 320, 820);
+    let floorUnit = clamp(Math.round(targetInner / Math.max(floorCount, 6)), 26, 92);
+    if (floorCount > 24) {
+      floorUnit = clamp(Math.round(floorUnit * 0.9), 22, floorUnit);
+    }
+    if (floorCount > 40) {
+      floorUnit = clamp(Math.round(floorUnit * 0.82), 18, floorUnit);
+    }
+
+    const cabinHeight = clamp(Math.round(floorUnit * 0.7), 42, 96);
+    const innerHeight = floorCount > 1 ? floorUnit * (floorCount - 1) : floorUnit;
+    const paddingTop = Math.max(Math.round(cabinHeight * 1.05), Math.round(floorUnit * 1.2));
+    const paddingBottom = Math.max(Math.round(cabinHeight * 0.75), Math.round(floorUnit * 0.9));
+    const paddingHorizontal = Math.max(28, Math.round(Math.min(56, floorUnit * 1.15)));
+    const effectiveElevators = Math.max(elevatorCount, 1);
+    const laneWidth = clamp(Math.round(118 - (effectiveElevators - 1) * 8), 78, 138);
+    const laneGap = clamp(Math.round(32 - Math.max(0, effectiveElevators - 2) * 3), 18, 48);
+    const ratioMap = new Map();
+    if (floorSpan > 0) {
+      effectiveFloors.forEach((floor) => {
+        const ratio = clamp((floor - minFloor) / floorSpan, 0, 1);
+        ratioMap.set(floor, ratio);
+      });
+    } else if (floorCount > 1) {
+      effectiveFloors.forEach((floor, index) => {
+        const ratio = clamp(index / (floorCount - 1), 0, 1);
+        ratioMap.set(floor, ratio);
+      });
+    } else {
+      ratioMap.set(effectiveFloors[0], 0);
+    }
+    const stepHeight = floorCount > 1 ? innerHeight / (floorCount - 1) : innerHeight;
+
+    return {
+      floorNumbers: effectiveFloors,
+      floorCount,
+      minFloor,
+      maxFloor,
+      floorSpan,
+      floorUnit,
+      cabinHeight,
+      innerHeight,
+      paddingTop,
+      paddingBottom,
+      paddingHorizontal,
+      laneWidth,
+      laneGap,
+      elevatorCount: effectiveElevators,
+      floorLabelOffset: minFloor >= 0 ? 1 : 0,
+      floorRatios: ratioMap,
+      stepHeight,
+    };
+  }
+
+  applyLayout() {
+    if (!this.layout) {
+      return;
+    }
+    const layout = this.layout;
+    const stageHeight = Math.round(layout.innerHeight + layout.paddingTop + layout.paddingBottom);
+    if (this.wrapperEl) {
+      this.wrapperEl.style.setProperty("--scene-inner-height", `${layout.innerHeight}px`);
+      this.wrapperEl.style.setProperty("--scene-padding-top", `${layout.paddingTop}px`);
+      this.wrapperEl.style.setProperty("--scene-padding-bottom", `${layout.paddingBottom}px`);
+      this.wrapperEl.style.setProperty("--scene-padding-horizontal", `${layout.paddingHorizontal}px`);
+    }
+    if (this.stageEl) {
+      this.stageEl.style.minHeight = `${stageHeight}px`;
+      this.stageEl.style.setProperty("--scene-padding-top", `${layout.paddingTop}px`);
+      this.stageEl.style.setProperty("--scene-padding-bottom", `${layout.paddingBottom}px`);
+      this.stageEl.style.setProperty("--scene-padding-horizontal", `${layout.paddingHorizontal}px`);
+      this.stageEl.style.setProperty("--scene-inner-height", `${layout.innerHeight}px`);
+    }
+    if (this.elevatorLayerEl) {
+      this.elevatorLayerEl.style.setProperty("--elevator-count", String(Math.max(layout.elevatorCount, 1)));
+      this.elevatorLayerEl.style.setProperty("--scene-inner-height", `${layout.innerHeight}px`);
+      this.elevatorLayerEl.style.setProperty("--scene-cabin-height", `${layout.cabinHeight}px`);
+      this.elevatorLayerEl.style.setProperty("--scene-lane-width", `${layout.laneWidth}px`);
+      this.elevatorLayerEl.style.setProperty("--scene-lane-gap", `${layout.laneGap}px`);
+    }
+    // 地板线容器的几何范围改为纯 CSS 变量控制（top/bottom/left/right），
+    // 这里不再直接写 height，避免与 inset:0 冲突导致错位。
+    if (this.axisShellEl) {
+      this.axisShellEl.style.setProperty("--scene-inner-height", `${layout.innerHeight}px`);
+      const shellHeight = layout.innerHeight + layout.paddingTop + layout.paddingBottom;
+      this.axisShellEl.style.minHeight = `${shellHeight}px`;
+      this.axisShellEl.style.height = `${shellHeight}px`;
+    }
+    if (this.axisEl) {
+      this.axisEl.style.height = `${layout.innerHeight}px`;
+    }
+  }
+
+  buildAxis() {
+    if (!this.layout) {
+      return;
+    }
+    // 左侧楼层轴整体取消，但仍需构建右侧面板的每层行
+    if (this.axisEl) {
+      this.axisEl.innerHTML = "";
+    }
+    if (this.panelBodyEl) {
+      this.panelBodyEl.innerHTML = "";
+    }
+    this.floorEntries.clear();
+    const rows = this.layout.floorNumbers;
+    // 根据楼层数量自适应标签密度，避免高楼层场景挤压
+    const denseStep = rows.length > 60 ? 5 : rows.length > 32 ? 2 : 1;
+    rows.forEach((floor, idx) => {
+      const bottom = this.getBottomForValue(floor);
+      // 取消左侧轴，仅在存在 axisEl 时才生成（当前为 null，不会生成）
+      let axisRow = null;
+      let upChip = null;
+      let downChip = null;
+      if (this.axisEl) {
+        axisRow = document.createElement("div");
+        axisRow.className = "scene-axis-row";
+        axisRow.dataset.floor = String(floor);
+        axisRow.style.bottom = `${bottom}px`;
+        if (denseStep > 1 && idx % denseStep !== 0 && idx !== 0 && idx !== rows.length - 1) {
+          axisRow.classList.add("compact");
+        }
+        const labelEl = document.createElement("span");
+        labelEl.className = "scene-floor-label";
+        labelEl.textContent = this.formatFloorLabel(floor);
+        axisRow.appendChild(labelEl);
+        const counterWrap = document.createElement("div");
+        counterWrap.className = "scene-wait-counters";
+        upChip = document.createElement("span");
+        upChip.className = "wait-chip up";
+        upChip.textContent = "↑0";
+        downChip = document.createElement("span");
+        downChip.className = "wait-chip down";
+        downChip.textContent = "↓0";
+        counterWrap.append(upChip, downChip);
+        axisRow.appendChild(counterWrap);
+        this.axisEl.appendChild(axisRow);
+      }
+
+      const panelRow = document.createElement("div");
+      panelRow.className = "scene-panel-row";
+      panelRow.dataset.floor = String(floor);
+      const floorSpan = document.createElement("span");
+      floorSpan.className = "panel-floor";
+      floorSpan.textContent = this.formatFloorLabel(floor);
+      const upQueue = document.createElement("div");
+      upQueue.className = "panel-queue up";
+      const downQueue = document.createElement("div");
+      downQueue.className = "panel-queue down";
+      panelRow.append(floorSpan, upQueue, downQueue);
+      if (this.panelBodyEl) {
+        this.panelBodyEl.appendChild(panelRow);
+      }
+
+      this.floorEntries.set(floor, {
+        row: axisRow || null,
+        upAxis: upChip || null,
+        downAxis: downChip || null,
+        panelRow,
+        upQueue,
+        downQueue,
+        prevUp: 0,
+        prevDown: 0,
+      });
+    });
+  }
+
+  buildElevatorLanes(elevators) {
+    if (!this.elevatorLayerEl) {
+      return;
+    }
+    this.elevatorLayerEl.innerHTML = "";
+    this.elevatorNodes.clear();
+    const layout = this.layout;
+    const dataset =
+      Array.isArray(elevators) && elevators.length
+        ? elevators
+        : Array.from({ length: layout ? layout.elevatorCount : 1 }, (_, index) => ({ id: index + 1 }));
+    dataset.forEach((info, index) => {
+      const node = this.createElevatorNode(info, index);
+      const key = String(info.id ?? index + 1);
+      this.elevatorNodes.set(key, node);
+    });
+  }
+
+  createElevatorNode(info, index) {
+    const lane = document.createElement("div");
+    lane.className = "scene-elevator-lane";
+    lane.dataset.elevatorId = String(info.id ?? index + 1);
+
+    const cabin = document.createElement("div");
+    cabin.className = "scene-elevator-cabin";
+    cabin.dataset.direction = "idle";
+    cabin.dataset.state = "idle";
+    cabin.dataset.load = "empty";
+
+    const header = document.createElement("div");
+    header.className = "scene-cabin-header";
+    const idEl = document.createElement("span");
+    idEl.className = "scene-cabin-id";
+    idEl.textContent = `#${info.id ?? index + 1}`;
+    const floorEl = document.createElement("span");
+    floorEl.className = "scene-cabin-floor";
+    floorEl.textContent = "--";
+    const targetEl = document.createElement("span");
+    targetEl.className = "scene-cabin-target";
+    targetEl.textContent = "→ --";
+    header.append(idEl, floorEl, targetEl);
+
+    const body = document.createElement("div");
+    body.className = "scene-cabin-body";
+    const loadWrap = document.createElement("div");
+    loadWrap.className = "scene-cabin-load";
+    const loadBar = document.createElement("div");
+    loadBar.className = "scene-cabin-load-bar";
+    loadWrap.appendChild(loadBar);
+    const passengersEl = document.createElement("div");
+    passengersEl.className = "scene-cabin-passengers";
+    body.append(loadWrap, passengersEl);
+
+    cabin.append(header, body);
+    lane.appendChild(cabin);
+    if (this.elevatorLayerEl) {
+      this.elevatorLayerEl.appendChild(lane);
+    }
+
+    return {
+      lane,
+      cabin,
+      idEl,
+      floorEl,
+      targetEl,
+      loadBar,
+      passengersEl,
+    };
+  }
+
+  updateFloors(floors) {
+    if (!this.layout || !this.floorEntries.size) {
+      return;
+    }
+    const floorMap = new Map();
+    floors.forEach((item) => {
+      const floorNumber = ensureNumber(item.floor, Number.NaN);
+      if (!Number.isFinite(floorNumber)) {
+        return;
+      }
+      const up = ensureNumber(
+        item.up_waiting ?? item.waiting_up ?? item.waiting_up_count ?? item.up ?? 0,
+        0
+      );
+      const down = ensureNumber(
+        item.down_waiting ?? item.waiting_down ?? item.waiting_down_count ?? item.down ?? 0,
+        0
+      );
+      const total = ensureNumber(item.total ?? item.total_waiting ?? up + down, up + down);
+      floorMap.set(floorNumber, { up, down, total });
+    });
+
+    this.floorEntries.forEach((entry, floor) => {
+      const stats = floorMap.get(floor) || { up: 0, down: 0, total: 0 };
+      if (entry.upAxis) entry.upAxis.textContent = `↑${stats.up}`;
+      if (entry.downAxis) entry.downAxis.textContent = `↓${stats.down}`;
+      if (entry.upQueue) {
+        this.renderQueueDots(entry.upQueue, stats.up, entry.prevUp ?? stats.up);
+        entry.prevUp = stats.up;
+      }
+      if (entry.downQueue) {
+        this.renderQueueDots(entry.downQueue, stats.down, entry.prevDown ?? stats.down);
+        entry.prevDown = stats.down;
+      }
+      const hasWaiting = stats.total > 0;
+      if (entry.row) entry.row.classList.toggle("has-waiting", hasWaiting);
+      if (entry.panelRow) entry.panelRow.classList.toggle("has-waiting", hasWaiting);
+      if (entry.line) entry.line.classList.toggle("has-waiting", hasWaiting);
+    });
+  }
+
+  updateElevators(elevators) {
+    if (!this.layout) {
+      return;
+    }
+    const seen = new Set();
+    const activeFloors = new Map();
+
+    elevators.forEach((elevator, index) => {
+      const key = String(elevator.id ?? index + 1);
+      let node = this.elevatorNodes.get(key);
+      if (!node) {
+        node = this.createElevatorNode(elevator, index);
+        this.elevatorNodes.set(key, node);
+      }
+      if (this.elevatorLayerEl && node.lane !== this.elevatorLayerEl.children[index]) {
+        this.elevatorLayerEl.insertBefore(node.lane, this.elevatorLayerEl.children[index] || null);
+      }
+      seen.add(key);
+      this.applyElevatorState(node, elevator);
+
+      const closestFloor = this.findClosestFloor(ensureNumber(elevator.current, this.layout.minFloor));
+      if (closestFloor !== null) {
+        activeFloors.set(closestFloor, (activeFloors.get(closestFloor) || 0) + 1);
+      }
+    });
+
+    this.elevatorNodes.forEach((node, id) => {
+      if (!seen.has(id)) {
+        node.lane.remove();
+        this.elevatorNodes.delete(id);
+      }
+    });
+
+    this.floorEntries.forEach((entry, floor) => {
+      const isActive = activeFloors.has(floor);
+      if (entry.row) entry.row.classList.toggle("is-active", isActive);
+      if (entry.panelRow) entry.panelRow.classList.toggle("is-active", isActive);
+      if (entry.line) entry.line.classList.toggle("is-active", isActive);
+    });
+  }
+
+  applyElevatorState(node, elevator) {
+    if (!this.layout) {
+      return;
+    }
+    const floorValue = ensureNumber(elevator.current, this.layout.minFloor);
+    const bottom = this.getBottomForValue(floorValue);
+    node.cabin.style.bottom = `${bottom}px`;
+
+    // 在电梯内显示当前楼层（替代左侧楼层轴）
+    if (node.floorEl) {
+      node.floorEl.textContent = this.formatFloorLabel(Math.round(floorValue));
+    }
+
+    const loadFactor = clamp(ensureNumber(elevator.load_factor, 0), 0, 1);
+    node.loadBar.style.transform = `scaleX(${loadFactor.toFixed(3)})`;
+    let loadState = "empty";
+    if (loadFactor >= 0.85) {
+      loadState = "full";
+    } else if (loadFactor >= 0.55) {
+      loadState = "mid";
+    } else if (loadFactor >= 0.25) {
+      loadState = "light";
+    }
+    node.cabin.dataset.load = loadState;
+
+    const direction = (elevator.direction || "").toString().toLowerCase();
+    node.cabin.dataset.direction = direction === "up" || direction === "down" ? direction : "idle";
+
+    const rawStatus = (elevator.status || elevator.run_status || "").toString().toLowerCase();
+    node.cabin.dataset.state = rawStatus || "idle";
+    node.cabin.dataset.doors = rawStatus === "stopped" ? "open" : "closed";
+
+    const passengerCount = ensureNumber(elevator.passenger_count, 0);
+    this.renderPassengerDots(node.passengersEl, passengerCount);
+    // 乘客动画：根据人数变化判断上/下客，短暂展示流动效果
+    const key = String(elevator.id ?? "__unknown");
+    const prev = ensureNumber(this.prevPassengerCount.get(key), passengerCount);
+    const delta = passengerCount - prev;
+    this.prevPassengerCount.set(key, passengerCount);
+    if (node.passengersEl) {
+      node.passengersEl.classList.toggle("is-boarding", delta > 0);
+      node.passengersEl.classList.toggle("is-alighting", delta < 0);
+      // 600ms 后自动清除动画标记
+      const prevTimer = this.passengerAnimTimers.get(key);
+      if (prevTimer) window.clearTimeout(prevTimer);
+      if (delta !== 0) {
+        const t = window.setTimeout(() => {
+          node.passengersEl.classList.remove("is-boarding", "is-alighting");
+          this.passengerAnimTimers.delete(key);
+        }, 600);
+        this.passengerAnimTimers.set(key, t);
+      }
+    }
+
+    if (node.idEl) {
+      node.idEl.textContent = `#${elevator.id ?? ""}`;
+    }
+    if (node.targetEl) {
+      node.targetEl.textContent = `→ ${formatTargetFloor(elevator.target ?? elevator.next_target ?? null)}`;
+    }
+  }
+
+  renderPassengerDots(container, count) {
+    if (!container) {
+      return;
+    }
+    const safeCount = Math.max(0, ensureNumber(count, 0));
+    container.innerHTML = "";
+    const visible = Math.min(safeCount, 6);
+    for (let i = 0; i < visible; i += 1) {
+      const dot = document.createElement("span");
+      dot.className = "scene-passenger-dot";
+      dot.style.setProperty("--dot-index", String(i));
+      container.appendChild(dot);
+    }
+    if (safeCount > visible) {
+      const extra = document.createElement("span");
+      extra.className = "scene-passenger-extra";
+      extra.textContent = `+${safeCount - visible}`;
+      container.appendChild(extra);
+    }
+  }
+
+  renderQueueDots(container, count, prevCount = 0) {
+    if (!container) return;
+    const safeCount = Math.max(0, ensureNumber(count, 0));
+    const prev = Math.max(0, ensureNumber(prevCount, 0));
+    const maxVisible = 10;
+    // 预留一个 extra 占位
+    const existingDots = Array.from(container.querySelectorAll('.queue-dot'));
+    const extraEl = container.querySelector('.queue-extra');
+    const needVisible = Math.min(safeCount, maxVisible);
+
+    // 删除多余节点（带退出动画）
+    if (existingDots.length > needVisible) {
+      const toRemove = existingDots.slice(needVisible);
+      toRemove.forEach((el) => {
+        el.classList.add('exit');
+        setTimeout(() => el.remove(), 320);
+      });
+    }
+
+    // 添加缺失节点（带进入动画）
+    if (existingDots.length < needVisible) {
+      for (let i = existingDots.length; i < needVisible; i += 1) {
+        const dot = document.createElement('span');
+        dot.className = 'queue-dot enter';
+        container.appendChild(dot);
+        // 进入动画结束后移除 enter 标记
+        setTimeout(() => dot.classList.remove('enter'), 360);
+      }
+    }
+
+    // 更新 extra
+    const extra = safeCount - needVisible;
+    if (extra > 0) {
+      if (!extraEl) {
+        const badge = document.createElement('span');
+        badge.className = 'queue-extra';
+        badge.textContent = `+${extra}`;
+        container.appendChild(badge);
+      } else {
+        extraEl.textContent = `+${extra}`;
+      }
+    } else if (extraEl) {
+      extraEl.remove();
+    }
+
+    // 入队/出队整体动效
+    if (safeCount !== prev) {
+      container.classList.toggle('is-enqueue', safeCount > prev);
+      container.classList.toggle('is-dequeue', safeCount < prev);
+      setTimeout(() => {
+        container.classList.remove('is-enqueue', 'is-dequeue');
+      }, 320);
+    }
+  }
+
+  getValueRatio(value) {
+    if (!this.layout || !Number.isFinite(value)) {
+      return 0;
+    }
+    if (this.floorRatioMap?.has(value)) {
+      return clamp(this.floorRatioMap.get(value), 0, 1);
+    }
+    if (this.layout.floorSpan > 0) {
+      return clamp((value - this.layout.minFloor) / this.layout.floorSpan, 0, 1);
+    }
+    const floors = this.layout.floorNumbers;
+    if (!floors.length) {
+      return 0;
+    }
+    if (floors.length === 1) {
+      return 0;
+    }
+    const minFloor = floors[0];
+    const maxFloor = floors[floors.length - 1];
+    if (value <= minFloor) {
+      return 0;
+    }
+    if (value >= maxFloor) {
+      return 1;
+    }
+    for (let i = 1; i < floors.length; i += 1) {
+      const upper = floors[i];
+      if (upper >= value) {
+        const lower = floors[i - 1];
+        const lowerRatio = this.floorRatioMap?.get(lower) ?? clamp((lower - minFloor) / (maxFloor - minFloor || 1), 0, 1);
+        const upperRatio = this.floorRatioMap?.get(upper) ?? clamp((upper - minFloor) / (maxFloor - minFloor || 1), 0, 1);
+        const span = upper - lower;
+        const t = span !== 0 ? (value - lower) / span : 0;
+        return clamp(lowerRatio + (upperRatio - lowerRatio) * t, 0, 1);
+      }
+    }
+    return 0;
+  }
+
+  getBottomForValue(value) {
+    const ratio = this.getValueRatio(value);
+    const innerHeight = this.layout?.innerHeight ?? 0;
+    return clamp(ratio, 0, 1) * innerHeight;
+  }
+
+  updateSummary(up = 0, down = 0) {
+    const upCount = ensureNumber(up, 0);
+    const downCount = ensureNumber(down, 0);
+    this.lastSummary = { up: upCount, down: downCount };
+    if (!this.summaryEl) {
+      return;
+    }
+    const total = upCount + downCount;
+    if (total === 0) {
+      this.summaryEl.textContent = "无乘客排队";
+      this.summaryEl.classList.remove("has-data");
+    } else {
+      this.summaryEl.textContent = `↑${upCount} / ↓${downCount}`;
+      this.summaryEl.classList.add("has-data");
+    }
+  }
+
+  formatFloorLabel(floor) {
+    if (!Number.isFinite(floor)) {
+      return `${floor}`;
+    }
+    if (floor < 0) {
+      return `B${Math.abs(floor)}F`;
+    }
+    if (this.layout?.floorLabelOffset) {
+      return `${floor + this.layout.floorLabelOffset}F`;
+    }
+    return `${floor}F`;
+  }
+
+  findClosestFloor(value) {
+    if (!this.layout || !this.layout.floorNumbers.length || !Number.isFinite(value)) {
+      return null;
+    }
+    let closest = this.layout.floorNumbers[0];
+    let minDistance = Math.abs(value - closest);
+    for (let i = 1; i < this.layout.floorNumbers.length; i += 1) {
+      const candidate = this.layout.floorNumbers[i];
+      const distance = Math.abs(value - candidate);
+      if (distance < minDistance) {
+        closest = candidate;
+        minDistance = distance;
+      }
+    }
+    return closest;
+  }
+}
+
+const stageRenderer = new StageRenderer({
+  wrapperEl: sceneWrapperEl,
+  stageEl: sceneStageEl,
+  floorLinesEl: sceneFloorLinesEl,
+  axisShellEl: sceneAxisShellEl,
+  axisEl: sceneAxisEl,
+  elevatorLayerEl: sceneElevatorLayerEl,
+  panelBodyEl: scenePanelBodyEl,
+  summaryEl: queueSummaryEl,
+});
 
 let controllerRunning = false;
 let pendingAction = false;
 let scenarioLoading = false;
-
+let currentSpeedFactor = 1;
 const POLL_INTERVAL_BASE = 650;
 const MIN_POLL_INTERVAL = 180;
 let pollTimer = null;
-let currentSpeedFactor = 1;
-
-const sceneState = {
-  floorNumbers: [],
-  floorMeta: { min: 0, max: 1, span: 1, count: 0, range: 0 },
-  cabinHeightPx: null,
-  floorCentersPx: new Map(),
-  floorLevelsPx: new Map(),
-  floorCenterRatios: new Map(),
-  floorBoundaryRatios: new Map(),
-  shaftHeightPx: 0,
-  travelHeightPx: 0,
-  floorPixelRange: { start: 0, end: 0 },
-  doorHoldMax: 2,
-  stageScale: 1,
-  stageHeightPx: 0,
-  layout: {
-    paddingTop: 36,
-    paddingBottom: 28,
-    buildingPaddingX: 26,
-    shaftPaddingLeft: 42,
-    shaftPaddingRight: 42,
-    queueWidth: 220,
-    floorUnit: 48,
-    cabinHeight: 46,
-  },
-};
-
-const elevatorNodes = new Map();
-const waitingNodes = new Map();
-const passengerRegistry = new Map();
 let previousTick = null;
 let trafficCatalog = [];
 let currentTrafficInfo = null;
 let pendingScenarioIndex = null;
-let pendingElevatorSizeUpdate = false;
+let stageScale = 1;
 
 function getPollInterval() {
   return Math.max(MIN_POLL_INTERVAL, POLL_INTERVAL_BASE / Math.max(currentSpeedFactor, 0.25));
@@ -104,34 +800,10 @@ function applySpeedStyling() {
   updateSpeedButtons();
 }
 
-function setStageScale(multiplier, { silent = false } = {}) {
-  const normalized = Math.max(0.7, Math.min(multiplier, 1.4));
-  if (Math.abs(normalized - sceneState.stageScale) < 0.01) {
-    if (!silent) {
-      updateStageScaleDisplay(normalized);
-    }
-    return;
-  }
-  sceneState.stageScale = normalized;
-  updateStageScaleDisplay(normalized);
-  if (visualStageEl) {
-    visualStageEl.style.setProperty("--stage-scale", normalized.toFixed(3));
-  }
-  requestElevatorSizeUpdate();
-  window.requestAnimationFrame(() => {
-    cacheFloorCenters();
-    elevatorNodes.forEach((node) => {
-      if (node.snapshot) {
-        updateElevatorVisual(node, node.snapshot);
-      }
-    });
-  });
-}
-
 function updateStageScaleDisplay(scale) {
   if (stageScaleInput) {
     const targetValue = Math.round(scale * 100);
-    if (parseInt(stageScaleInput.value, 10) !== targetValue) {
+    if (Number(stageScaleInput.value) !== targetValue) {
       stageScaleInput.value = String(targetValue);
     }
   }
@@ -140,11 +812,23 @@ function updateStageScaleDisplay(scale) {
   }
 }
 
-function initializeStageControls() {
-  if (visualStageEl) {
-    visualStageEl.style.setProperty("--stage-scale", sceneState.stageScale.toFixed(3));
+function setStageScale(multiplier, { silent = false } = {}) {
+  const normalized = clamp(multiplier, 0.7, 1.4);
+  if (Math.abs(normalized - stageScale) < 0.01) {
+    if (!silent) {
+      updateStageScaleDisplay(normalized);
+    }
+    return;
   }
-  updateStageScaleDisplay(sceneState.stageScale);
+  stageScale = normalized;
+  updateStageScaleDisplay(normalized);
+  if (sceneWrapperEl) {
+    sceneWrapperEl.style.setProperty("--stage-scale", normalized.toFixed(3));
+  }
+}
+
+function initializeStageControls() {
+  setStageScale(stageScale, { silent: true });
   if (stageScaleInput) {
     stageScaleInput.addEventListener("input", (event) => {
       const value = Number.parseInt(event.target.value, 10);
@@ -157,14 +841,14 @@ function initializeStageControls() {
     viewportResetBtn.addEventListener("click", () => {
       setStageScale(1);
       if (visualViewportEl) {
-        visualViewportEl.scrollTo({ top: 0, behavior: "smooth" });
+        visualViewportEl.scrollTo({ top: 0, left: 0, behavior: "smooth" });
       }
     });
   }
 }
 
 function setSpeedFactor(factor) {
-  const normalized = Math.max(0.25, Math.min(factor, 6));
+  const normalized = clamp(factor, 0.25, 6);
   if (Math.abs(normalized - currentSpeedFactor) < 0.05) {
     return;
   }
@@ -204,163 +888,12 @@ function startPolling(immediate = false) {
 
 function resetAnimationState() {
   previousTick = null;
-  passengerRegistry.clear();
-  pendingScenarioIndex = null;
-  sceneState.floorNumbers = [];
-  sceneState.floorMeta = { min: 0, max: 1, span: 1, count: 0, range: 0 };
-  sceneState.cabinHeightPx = null;
-  sceneState.floorCentersPx = new Map();
-  sceneState.floorLevelsPx = new Map();
-  sceneState.floorCenterRatios = new Map();
-  sceneState.floorBoundaryRatios = new Map();
-  sceneState.shaftHeightPx = 0;
-  sceneState.doorHoldMax = 2;
-  if (visualCanvasEl) {
-    visualCanvasEl.style.height = "";
-  }
-  if (visualStageEl) {
-    visualStageEl.style.minHeight = "";
-  }
-  if (motionLayer) {
-    motionLayer.innerHTML = "";
-  }
-}
-
-function pruneMotionLayer(limit = 80) {
-  if (!motionLayer) {
-    return;
-  }
-  while (motionLayer.children.length > limit) {
-    motionLayer.removeChild(motionLayer.firstChild);
-  }
-}
-
-function requestElevatorSizeUpdate() {
-  if (pendingElevatorSizeUpdate) {
-    return;
-  }
-  pendingElevatorSizeUpdate = true;
-  window.requestAnimationFrame(() => {
-    pendingElevatorSizeUpdate = false;
-    updateElevatorSizing();
-  });
-}
-
-function updateElevatorSizing() {
-  configureStageLayout(sceneState.floorNumbers.length || 0);
-  resizeStageHeight();
-
-  if (!visualCanvasEl || !shaftContainer) {
-    sceneState.cabinHeightPx = null;
-    sceneState.floorCentersPx = new Map();
-    sceneState.floorLevelsPx = new Map();
-    sceneState.shaftHeightPx = 0;
-    return;
-  }
-
-  const layout = sceneState.layout || {};
-  const unit = Number.isFinite(layout.floorUnit) && layout.floorUnit > 0 ? layout.floorUnit : 42;
-  let computedCabin = Number.isFinite(layout.cabinHeight) ? layout.cabinHeight : unit * 0.62;
-  const cabinUpper = Math.max(12, Math.min(unit - 4, 56));
-  const cabinLower = Math.max(12, Math.min(cabinUpper, unit * 0.45));
-  computedCabin = Math.max(cabinLower, Math.min(cabinUpper, computedCabin));
-  sceneState.cabinHeightPx = Math.round(computedCabin);
-
-  elevatorNodes.forEach((node) => applyCabinSizing(node));
-
-  window.requestAnimationFrame(() => {
-    cacheFloorCenters();
-    elevatorNodes.forEach((node) => {
-      if (node.snapshot) {
-        updateElevatorVisual(node, node.snapshot);
-      }
-    });
-  });
-}
-
-function applyCabinSizing(node) {
-  if (!node || !node.cabin) {
-    return;
-  }
-  const height = sceneState.cabinHeightPx;
-  const unit = sceneState.layout?.floorUnit;
-  if (typeof height === "number") {
-    node.cabin.style.minHeight = `${height}px`;
-    node.cabin.style.height = `${height}px`;
-  } else {
-    node.cabin.style.minHeight = "";
-    node.cabin.style.height = "";
-  }
-  if (Number.isFinite(unit)) {
-    const width = Math.round(Math.min(Math.max(unit * 0.9, 32), Math.max(44, unit * 1.1)));
-    node.cabin.style.width = `${width}px`;
-  } else {
-    node.cabin.style.width = "";
-  }
-  if (node.interior) {
-    if (typeof height === "number") {
-      const interiorHeight = Math.max(6, Math.min(Math.round(height * 0.72), Math.max(height - 6, 6)));
-      node.interior.style.minHeight = `${interiorHeight}px`;
-    } else {
-      node.interior.style.minHeight = "";
-    }
-  }
-  if (node.passengersEl) {
-    if (typeof height === "number") {
-      const usable = Math.max(6, Math.min(Math.round(height * 0.65), Math.max(height - 8, 6)));
-      node.passengersEl.style.maxHeight = `${usable}px`;
-    } else {
-      node.passengersEl.style.maxHeight = "";
-    }
-  }
-}
-
-function cacheFloorCenters() {
-  const floorNumbers = sceneState.floorNumbers;
-  if (!Array.isArray(floorNumbers) || !floorNumbers.length) {
-    sceneState.shaftHeightPx = 0;
-    sceneState.floorCentersPx = new Map();
-    sceneState.floorLevelsPx = new Map();
-    sceneState.floorPixelRange = { start: 0, end: 0 };
-    return;
-  }
-
-  const layout = sceneState.layout || {};
-  const unit = Number.isFinite(layout.floorUnit) ? layout.floorUnit : 40;
-  const centers = new Map();
-  const levels = new Map();
-  const travelHeight = Math.max((floorNumbers.length - 1) * unit, 0);
-
-  floorNumbers.forEach((floor, index) => {
-    const boundary = Math.min(travelHeight, index * unit);
-    const center = Math.min(travelHeight, boundary + unit / 2);
-    levels.set(floor, boundary);
-    centers.set(floor, center);
-
-    const entry = waitingNodes.get(floor);
-    if (entry?.root) {
-      entry.root.style.bottom = `${boundary}px`;
-    }
-    if (entry?.guide) {
-      entry.guide.style.bottom = `${boundary}px`;
-    }
-    if (entry?.label) {
-      entry.label.style.bottom = `${center}px`;
-    }
-  });
-
-  sceneState.floorPixelRange = { start: 0, end: travelHeight };
-  sceneState.travelHeightPx = travelHeight;
-  sceneState.shaftHeightPx = travelHeight;
-  sceneState.floorLevelsPx = levels;
-  sceneState.floorCentersPx = centers;
+  stageRenderer.reset();
 }
 
 async function fetchTrafficCatalog() {
   try {
-    const resp = await fetch(`/dashboard/traffic/list?_=${Date.now()}`, {
-      cache: "no-store",
-    });
+    const resp = await fetch(`/dashboard/traffic/list?_=${Date.now()}`, { cache: "no-store" });
     if (!resp.ok) {
       throw new Error(`HTTP ${resp.status}`);
     }
@@ -375,6 +908,132 @@ async function fetchTrafficCatalog() {
     trafficCatalog = [];
     renderTrafficOptions(trafficCatalog, currentTrafficInfo);
   }
+}
+
+async function fetchState() {
+  try {
+    const resp = await fetch(`/dashboard/state?_=${Date.now()}`, { cache: "no-store" });
+    if (!resp.ok) {
+      throw new Error(`HTTP ${resp.status}`);
+    }
+    const data = await resp.json();
+    renderState(data);
+  } catch (error) {
+    console.error("获取状态失败:", error);
+  }
+}
+
+function renderState(state) {
+  if (!state) {
+    return;
+  }
+  const currentTick = ensureNumber(state.tick, 0);
+  const running = Boolean(state.controller_running);
+  if (previousTick !== null && currentTick < previousTick) {
+    resetAnimationState();
+  }
+
+  const tickDisplay = Number.isFinite(currentTick) ? currentTick : state.tick ?? "--";
+  if (tickEl) {
+    tickEl.textContent = `Tick: ${tickDisplay}`;
+  }
+  const now = new Date();
+  const lastUpdateText = `上次更新：${now.toLocaleTimeString("zh-CN", { hour12: false }).padStart(8, "0")}`;
+  if (lastUpdateEl) {
+    lastUpdateEl.textContent = lastUpdateText;
+  }
+  if (overviewUpdateEl) {
+    overviewUpdateEl.textContent = lastUpdateText;
+  }
+  if (overviewTickEl) {
+    overviewTickEl.textContent = Number.isFinite(currentTick) ? String(currentTick) : "--";
+  }
+
+  const floors = Array.isArray(state.floors) ? state.floors : [];
+  const elevators = Array.isArray(state.elevators) ? state.elevators : [];
+  const metrics = state.metrics || {};
+
+  let totalWaiting = 0;
+  let totalUp = 0;
+  let totalDown = 0;
+  floors.forEach((floor) => {
+    const up = ensureNumber(
+      floor.up_waiting ?? floor.waiting_up ?? floor.waiting_up_count ?? floor.up ?? 0,
+      0
+    );
+    const down = ensureNumber(
+      floor.down_waiting ?? floor.waiting_down ?? floor.waiting_down_count ?? floor.down ?? 0,
+      0
+    );
+    const total = ensureNumber(floor.total ?? floor.total_waiting ?? up + down, up + down);
+    totalUp += up;
+    totalDown += down;
+    totalWaiting += total;
+  });
+
+  if (overviewStatusEl) {
+    overviewStatusEl.textContent = running ? "运行中" : "未运行";
+    overviewStatusEl.dataset.state = running ? "running" : "idle";
+  }
+  if (overviewWaitingEl) {
+    overviewWaitingEl.textContent = String(totalWaiting);
+  }
+  if (overviewMetricsEl) {
+    const averageWait = ensureNumber(metrics.average_floor_wait_time, 0);
+    overviewMetricsEl.textContent = `平均等候 ${averageWait.toFixed(1)} tick`;
+  }
+  const completedPassengers = ensureNumber(metrics.completed_passengers, 0);
+  const totalPassengers = ensureNumber(metrics.total_passengers, 0);
+  if (overviewCompletedEl) {
+    overviewCompletedEl.textContent =
+      totalPassengers > 0 ? `${completedPassengers}/${totalPassengers}` : String(completedPassengers);
+  }
+  if (overviewCompletionRateEl) {
+    const completionRate =
+      totalPassengers > 0 ? `完成率 ${(completedPassengers / totalPassengers * 100).toFixed(1)}%` : "完成率 --";
+    overviewCompletionRateEl.textContent = completionRate;
+  }
+
+  stageRenderer.render({
+    floors,
+    elevators,
+    summary: { up: totalUp, down: totalDown },
+  });
+
+  updateElevatorCards(elevators);
+  updateFloorTable(floors);
+  updateMetrics(metrics);
+
+  if (state.traffic) {
+    currentTrafficInfo = state.traffic;
+    const activeIndex = getActiveScenarioIndex(currentTrafficInfo);
+    if (pendingScenarioIndex !== null && activeIndex === pendingScenarioIndex) {
+      pendingScenarioIndex = null;
+    }
+    if (
+      scenarioSelect &&
+      activeIndex !== null &&
+      (scenarioLoading || pendingScenarioIndex === null) &&
+      (scenarioLoading || document.activeElement !== scenarioSelect)
+    ) {
+      const targetValue = String(activeIndex);
+      if (scenarioSelect.value !== targetValue) {
+        scenarioSelect.value = targetValue;
+      }
+    }
+    renderScenarioMeta(currentTrafficInfo);
+    if (overviewTrafficEl) {
+      const info = currentTrafficInfo.current_file || currentTrafficInfo;
+      const label = info?.label || info?.filename || "未选择";
+      overviewTrafficEl.textContent = `当前测试：${label}`;
+    }
+  } else if (overviewTrafficEl) {
+    overviewTrafficEl.textContent = "当前测试：--";
+  }
+
+  controllerRunning = running;
+  updateControls();
+  previousTick = currentTick;
 }
 
 function renderTrafficOptions(catalog, info) {
@@ -492,672 +1151,7 @@ function updateScenarioControls() {
   const activeIndex = getActiveScenarioIndex(currentTrafficInfo);
   const noChange = !Number.isNaN(selectedIndex) && activeIndex === selectedIndex;
   applyScenarioBtn.disabled = disabled || !scenarioSelect.value || noChange;
-  if (scenarioLoading) {
-    applyScenarioBtn.textContent = "载入中...";
-  } else {
-    applyScenarioBtn.textContent = "载入测试";
-  }
-}
-
-async function fetchState() {
-  try {
-    const resp = await fetch(`/dashboard/state?_=${Date.now()}`, {
-      cache: "no-store",
-    });
-    if (!resp.ok) {
-      throw new Error(`HTTP ${resp.status}`);
-    }
-    const data = await resp.json();
-    renderState(data);
-  } catch (error) {
-    console.error("获取状态失败:", error);
-  }
-}
-
-function renderState(state) {
-  if (!state) {
-    return;
-  }
-  const currentTick = ensureNumber(state.tick, 0);
-  const running = Boolean(state.controller_running);
-  if (previousTick !== null && currentTick < previousTick) {
-    resetAnimationState();
-  }
-
-  const tickDisplay = Number.isFinite(currentTick)
-    ? currentTick
-    : state.tick ?? "--";
-  tickEl.textContent = `Tick: ${tickDisplay}`;
-  const now = new Date();
-  const lastUpdateText = `上次更新：${now
-    .toLocaleTimeString("zh-CN", { hour12: false })
-    .padStart(8, "0")}`;
-  if (lastUpdateEl) {
-    lastUpdateEl.textContent = lastUpdateText;
-  }
-  if (overviewUpdateEl) {
-    overviewUpdateEl.textContent = lastUpdateText;
-  }
-  if (overviewTickEl) {
-    overviewTickEl.textContent = Number.isFinite(currentTick) ? String(currentTick) : "--";
-  }
-
-  const floors = Array.isArray(state.floors) ? state.floors : [];
-  const totalWaiting = floors.reduce(
-    (acc, floor) => acc + ensureNumber(floor.total ?? floor.total_waiting ?? 0, 0),
-    0
-  );
-  const metrics = state.metrics || {};
-  const averageWait = ensureNumber(metrics.average_floor_wait_time, 0);
-  const completedPassengers = ensureNumber(metrics.completed_passengers, 0);
-  const totalPassengers = ensureNumber(metrics.total_passengers, 0);
-
-  if (overviewStatusEl) {
-    overviewStatusEl.textContent = running ? "运行中" : "未运行";
-    overviewStatusEl.dataset.state = running ? "running" : "idle";
-  }
-  if (overviewWaitingEl) {
-    overviewWaitingEl.textContent = String(totalWaiting);
-  }
-  if (overviewMetricsEl) {
-    overviewMetricsEl.textContent = `平均等候 ${averageWait.toFixed(1)} tick`;
-  }
-  if (overviewCompletedEl) {
-    overviewCompletedEl.textContent =
-      totalPassengers > 0 ? `${completedPassengers}/${totalPassengers}` : String(completedPassengers);
-  }
-  if (overviewCompletionRateEl) {
-    const completionRate =
-      totalPassengers > 0 ? `完成率 ${(completedPassengers / totalPassengers * 100).toFixed(1)}%` : "完成率 --";
-    overviewCompletionRateEl.textContent = completionRate;
-  }
-
-  ensureSceneStructure(state);
-  updateElevatorScene(state);
-  updatePassengerVisuals(state.passengers || []);
-  updateElevatorCards(state.elevators || []);
-  updateFloorTable(floors);
-  updateMetrics(metrics);
-  if (state.traffic) {
-    currentTrafficInfo = state.traffic;
-    const activeIndex = getActiveScenarioIndex(currentTrafficInfo);
-    if (pendingScenarioIndex !== null && activeIndex === pendingScenarioIndex) {
-      pendingScenarioIndex = null;
-    }
-    if (
-      scenarioSelect &&
-      activeIndex !== null &&
-      (scenarioLoading || pendingScenarioIndex === null) &&
-      (scenarioLoading || document.activeElement !== scenarioSelect)
-    ) {
-      const targetValue = String(activeIndex);
-      if (scenarioSelect.value !== targetValue) {
-        scenarioSelect.value = targetValue;
-      }
-    }
-    renderScenarioMeta(currentTrafficInfo);
-    if (overviewTrafficEl) {
-      const info = currentTrafficInfo.current_file || currentTrafficInfo;
-      const label = info?.label || info?.filename || "未选择";
-      overviewTrafficEl.textContent = `当前测试：${label}`;
-    }
-  } else if (overviewTrafficEl) {
-    overviewTrafficEl.textContent = "当前测试：--";
-  }
-
-  controllerRunning = running;
-  updateControls();
-  previousTick = currentTick;
-}
-
-function ensureSceneStructure(state) {
-  const floorNumbers = (state.floors || [])
-    .map((f) => f.floor)
-    .sort((a, b) => a - b);
-  if (!arraysEqual(sceneState.floorNumbers, floorNumbers)) {
-    sceneState.floorNumbers = floorNumbers;
-    buildFloorScaffolding(floorNumbers);
-  }
-  syncElevatorShafts(state.elevators || []);
-}
-
-function buildFloorScaffolding(floorNumbers) {
-  if (!floorLabelsEl || !floorGuidesEl || !waitingAreaEl) {
-    return;
-  }
-  floorLabelsEl.innerHTML = "";
-  floorGuidesEl.innerHTML = "";
-  waitingAreaEl.innerHTML = "";
-  waitingNodes.forEach((entry) => {
-    if (entry?.highlightTimer) {
-      clearTimeout(entry.highlightTimer);
-    }
-  });
-  waitingNodes.clear();
-
-  if (!floorNumbers.length) {
-    sceneState.floorMeta = { min: 0, max: 1, span: 1, count: 0 };
-    return;
-  }
-
-  const min = floorNumbers[0];
-  const max = floorNumbers[floorNumbers.length - 1];
-  const range = max - min;
-  const span = Math.max(range, 1);
-  sceneState.floorMeta = { min, max, span, count: floorNumbers.length, range };
-  const centerRatios = new Map();
-  const boundaryRatios = new Map();
-  const total = floorNumbers.length;
-  const clampPercent = (value, low = 0, high = 100) => Math.min(high, Math.max(low, value));
-  const clampRatio = (ratio) => Math.min(1, Math.max(0, ratio));
-  const intervalCount = total > 1 ? total - 1 : 1;
-  const centerStep = total > 0 ? 1 / total : 0;
-
-  floorNumbers.forEach((floor, index) => {
-    const boundaryRatio = total <= 1 ? 0.5 : clampRatio(index / intervalCount);
-    const centerRatio = total <= 1 ? 0.5 : clampRatio(centerStep * (index + 0.5));
-    boundaryRatios.set(floor, boundaryRatio);
-    centerRatios.set(floor, centerRatio);
-    const levelPercent = clampPercent(boundaryRatio * 100, 0, 100);
-    const centerPercent = clampPercent(centerRatio * 100, 0, 100);
-
-    const label = document.createElement("div");
-    label.className = "floor-label";
-    label.dataset.floor = String(floor);
-    label.textContent = formatFloorLabel(floor);
-    label.style.bottom = `${centerPercent}%`;
-    floorLabelsEl.appendChild(label);
-
-    const guide = document.createElement("div");
-    guide.className = "floor-guide";
-    guide.dataset.floor = String(floor);
-    guide.style.bottom = `${levelPercent}%`;
-    floorGuidesEl.appendChild(guide);
-
-    const waitingRoot = document.createElement("div");
-    waitingRoot.className = "floor-waiting inactive";
-    waitingRoot.dataset.floor = String(floor);
-    waitingRoot.style.bottom = `${levelPercent}%`;
-
-    const upQueue = document.createElement("div");
-    upQueue.className = "wait-queue up";
-    upQueue.dataset.label = "↑";
-    waitingRoot.appendChild(upQueue);
-
-    const downQueue = document.createElement("div");
-    downQueue.className = "wait-queue down";
-    downQueue.dataset.label = "↓";
-    waitingRoot.appendChild(downQueue);
-
-    waitingAreaEl.appendChild(waitingRoot);
-    waitingNodes.set(floor, {
-      root: waitingRoot,
-      up: upQueue,
-      down: downQueue,
-      guide,
-      label,
-      upCount: 0,
-      downCount: 0,
-      highlightTimer: null,
-    });
-  });
-  sceneState.floorCenterRatios = centerRatios;
-  sceneState.floorBoundaryRatios = boundaryRatios;
-
-  configureStageLayout(total);
-
-  if (total > 0) {
-    const roofGuide = document.createElement("div");
-    roofGuide.className = "floor-guide floor-guide-roof";
-    roofGuide.dataset.floor = `${floorNumbers[total - 1]}-top`;
-    roofGuide.style.top = "0";
-    floorGuidesEl.appendChild(roofGuide);
-  }
-
-  resizeStageHeight(floorNumbers.length);
-  requestElevatorSizeUpdate();
-  window.requestAnimationFrame(cacheFloorCenters);
-}
-
-function configureStageLayout(floorCount) {
-  const layout = sceneState.layout;
-  const elevatorCount = Math.max(elevatorNodes.size || 0, 1);
-  const floors = Math.max(floorCount, 1);
-  const viewportHeight = visualViewportEl?.clientHeight ?? window.innerHeight ?? 760;
-  const viewportWidth = visualViewportEl?.clientWidth ?? window.innerWidth ?? 1280;
-  const availableHeight = Math.max(viewportHeight - 280, 420);
-
-  const minUnit =
-    floors > 48 ? 16 : floors > 36 ? 18 : floors > 24 ? 22 : floors > 16 ? 26 : floors > 8 ? 32 : 36;
-  const maxUnit =
-    floors <= 3 ? 80 : floors <= 6 ? 72 : floors <= 12 ? 64 : floors <= 20 ? 58 : floors <= 32 ? 52 : 48;
-  let floorUnit = availableHeight / Math.max(floors + 2, 8);
-  floorUnit = Math.max(minUnit, Math.min(maxUnit, floorUnit));
-  if (floors > 48) {
-    floorUnit = Math.max(16, floorUnit * 0.85);
-  } else if (floors > 32) {
-    floorUnit = Math.max(minUnit, floorUnit * 0.9);
-  } else if (floors > 20) {
-    floorUnit = Math.max(minUnit, floorUnit * 0.94);
-  }
-  floorUnit = Math.max(12, Math.round(floorUnit));
-
-  const cabinUpperBound = Math.max(14, Math.min(floorUnit - 4, 56));
-  const cabinLowerBound = Math.max(12, Math.min(cabinUpperBound, floorUnit * 0.45));
-  let cabinHeight = Math.min(Math.max(floorUnit * 0.62, cabinLowerBound), cabinUpperBound);
-  cabinHeight = Math.max(12, Math.round(Math.min(cabinHeight, cabinUpperBound)));
-
-  let paddingTop = Math.max(Math.round(cabinHeight + 26), Math.round(floorUnit * 1.12));
-  let paddingBottom = Math.max(20, Math.round(Math.max(cabinHeight * 0.9, floorUnit * 0.5)));
-  const buildingPaddingX = Math.max(22, Math.round(30 - Math.min(elevatorCount, 6) * 2));
-  const shaftPadding = buildingPaddingX + Math.max(14, Math.round(11 + Math.min(elevatorCount, 6)));
-  const queueBase = 180 + elevatorCount * 14;
-  const queueMax = Math.max(240, Math.min(360, Math.round(viewportWidth * 0.24)));
-  const queueWidth = Math.round(Math.min(queueMax, Math.max(200, queueBase)));
-
-  const travelHeight = Math.max(floors - 1, 0) * floorUnit;
-  const minStageHeight = Math.max(520, Math.round(viewportHeight * 0.6));
-  let stageHeight = Math.max(travelHeight + paddingTop + paddingBottom, minStageHeight);
-  const targetPadding = stageHeight - travelHeight;
-  const basePadding = paddingTop + paddingBottom;
-  if (targetPadding > basePadding) {
-    const extra = targetPadding - basePadding;
-    const topExtra = Math.round(extra * 0.6);
-    const bottomExtra = Math.round(extra - topExtra);
-    paddingTop += topExtra;
-    paddingBottom += bottomExtra;
-    const padDelta = targetPadding - (paddingTop + paddingBottom);
-    if (Math.abs(padDelta) >= 1) {
-      paddingBottom += Math.round(padDelta);
-    }
-  }
-
-  const effectiveTravel = Math.max(0, stageHeight - paddingTop - paddingBottom);
-  const effectiveUnit =
-    floors > 1 ? Math.max(1, effectiveTravel / (floors - 1)) : Math.max(floorUnit, Math.round(cabinHeight + 16));
-
-  layout.paddingTop = paddingTop;
-  layout.paddingBottom = paddingBottom;
-  layout.buildingPaddingX = buildingPaddingX;
-  layout.shaftPaddingLeft = shaftPadding;
-  layout.shaftPaddingRight = shaftPadding;
-  layout.queueWidth = queueWidth;
-  layout.floorUnit = effectiveUnit;
-  layout.cabinHeight = cabinHeight;
-
-  sceneState.stageHeightPx = stageHeight;
-  sceneState.travelHeightPx = effectiveTravel;
-  sceneState.floorPixelRange = { start: 0, end: effectiveTravel };
-  sceneState.cabinHeightPx = cabinHeight;
-
-  if (visualCanvasEl) {
-    visualCanvasEl.style.minHeight = `${stageHeight}px`;
-  }
-  const layoutTargets = [
-    visualCanvasEl,
-    visualStageEl,
-    waitingAreaEl,
-    stageQueueEl,
-    floorAxisEl,
-    floorAxisBodyEl,
-    shaftContainer,
-    motionLayer,
-    floorGuidesEl,
-    floorLabelsEl,
-  ].filter(Boolean);
-  layoutTargets.forEach((node) => {
-    node.style.setProperty("--floor-padding-top", `${layout.paddingTop}px`);
-    node.style.setProperty("--floor-padding-bottom", `${layout.paddingBottom}px`);
-    node.style.setProperty("--building-padding-x", `${layout.buildingPaddingX}px`);
-    node.style.setProperty("--shaft-padding-left", `${layout.shaftPaddingLeft}px`);
-    node.style.setProperty("--shaft-padding-right", `${layout.shaftPaddingRight}px`);
-    node.style.setProperty("--queue-width", `${layout.queueWidth}px`);
-    node.style.setProperty("--floor-unit", `${layout.floorUnit.toFixed(2)}px`);
-  });
-  updateQueueHeadroom();
-  if (visualStageEl) {
-    visualStageEl.style.minHeight = `${stageHeight}px`;
-  }
-}
-
-function updateQueueHeadroom() {
-  if (!stageQueueEl) {
-    return;
-  }
-  const headerHeight = queueHeaderEl ? queueHeaderEl.offsetHeight : 0;
-  const headroom = Math.max(0, headerHeight);
-  stageQueueEl.style.setProperty("--queue-headroom", `${headroom}px`);
-}
-
-function resizeStageHeight(floorCount) {
-  if (!visualCanvasEl) {
-    return;
-  }
-  const stageHeight = Math.max(sceneState.stageHeightPx || 0, 520);
-  visualCanvasEl.style.height = `${stageHeight}px`;
-  if (visualStageEl) {
-    visualStageEl.style.minHeight = `${stageHeight}px`;
-  }
-}
-
-function syncElevatorShafts(elevators) {
-  if (!shaftContainer) {
-    return;
-  }
-  const seen = new Set();
-  elevators.forEach((elevator, index) => {
-    let node = elevatorNodes.get(elevator.id);
-    if (!node) {
-      node = createElevatorVisual(elevator);
-    }
-    seen.add(elevator.id);
-    const desiredChild = shaftContainer.children[index];
-    if (desiredChild !== node.shaft) {
-      shaftContainer.insertBefore(node.shaft, desiredChild || null);
-    }
-  });
-
-  Array.from(elevatorNodes.keys()).forEach((id) => {
-    if (!seen.has(id)) {
-      const node = elevatorNodes.get(id);
-      if (node) {
-        node.shaft.remove();
-      }
-      elevatorNodes.delete(id);
-    }
-  });
-  configureStageLayout(sceneState.floorNumbers.length || 0);
-  requestElevatorSizeUpdate();
-}
-
-function createElevatorVisual(elevator) {
-  const shaft = document.createElement("div");
-  shaft.className = "shaft";
-  shaft.dataset.elevatorId = String(elevator.id);
-
-  const cabin = document.createElement("div");
-  cabin.className = "elevator-cabin";
-  cabin.dataset.direction = "idle";
-  cabin.dataset.doors = "closed";
-  cabin.dataset.status = "stopped";
-  cabin.dataset.load = "empty";
-
-  const header = document.createElement("div");
-  header.className = "cabin-header";
-
-  const idEl = document.createElement("span");
-  idEl.className = "cabin-id";
-  idEl.textContent = `#${elevator.id}`;
-  header.appendChild(idEl);
-
-  const targetEl = document.createElement("span");
-  targetEl.className = "cabin-target";
-  targetEl.textContent = `→ ${formatTargetFloor(elevator.target)}`;
-  header.appendChild(targetEl);
-
-  cabin.appendChild(header);
-
-  const interior = document.createElement("div");
-  interior.className = "cabin-interior";
-
-  const passengersEl = document.createElement("div");
-  passengersEl.className = "cabin-passengers";
-  interior.appendChild(passengersEl);
-
-  const doors = document.createElement("div");
-  doors.className = "cabin-doors";
-  doors.dataset.state = "closed";
-
-  const doorLeft = document.createElement("div");
-  doorLeft.className = "cabin-door left";
-  doors.appendChild(doorLeft);
-
-  const doorRight = document.createElement("div");
-  doorRight.className = "cabin-door right";
-  doors.appendChild(doorRight);
-
-  interior.appendChild(doors);
-  cabin.appendChild(interior);
-
-  shaft.appendChild(cabin);
-  shaftContainer.appendChild(shaft);
-
-  const node = {
-    shaft,
-    cabin,
-    targetEl,
-    passengersEl,
-    interior,
-    doors,
-    lastTarget: elevator.target,
-    passengerCount: 0,
-    flashTimer: null,
-    snapshot: null,
-  };
-  applyCabinSizing(node);
-  updateElevatorVisual(node, elevator);
-  elevatorNodes.set(elevator.id, node);
-  window.requestAnimationFrame(cacheFloorCenters);
-  return node;
-}
-
-function updateElevatorScene(state) {
-  const elevators = Array.isArray(state.elevators) ? state.elevators : [];
-  elevators.forEach((elevator) => {
-    const node = elevatorNodes.get(elevator.id);
-    if (!node) {
-      return;
-    }
-    updateElevatorVisual(node, elevator);
-  });
-}
-
-function updateElevatorVisual(node, elevator) {
-  const direction = normalizeDirection(elevator.direction);
-  if (node.cabin.dataset.direction !== direction) {
-    node.cabin.dataset.direction = direction;
-  }
-
-  const rawStatus = typeof elevator.status === "string" ? elevator.status : elevator.run_status || "";
-  const status = rawStatus ? String(rawStatus).toLowerCase() : "stopped";
-  if (status && node.cabin.dataset.status !== status) {
-    node.cabin.dataset.status = status;
-  }
-  const movingStatuses = new Set(["start_up", "start_down", "constant_speed"]);
-  const isMoving = movingStatuses.has(status);
-  node.cabin.classList.toggle("is-moving", isMoving);
-
-  const doorState = status === "stopped" ? "open" : "closed";
-  if (node.cabin.dataset.doors !== doorState) {
-    node.cabin.dataset.doors = doorState;
-  }
-  if (node.doors && node.doors.dataset.state !== doorState) {
-    node.doors.dataset.state = doorState;
-  }
-  const doorHold = ensureNumber(elevator.door_hold_ticks);
-  if (Number.isFinite(doorHold)) {
-    sceneState.doorHoldMax = Math.max(sceneState.doorHoldMax, doorHold, 2);
-  }
-  let doorProgress = 0;
-  if (status === "stopped") {
-    doorProgress = 1;
-  } else if (doorHold > 0) {
-    doorProgress = Math.min(1, doorHold / Math.max(sceneState.doorHoldMax, 1));
-  }
-  node.cabin.style.setProperty("--door-progress", doorProgress.toFixed(3));
-  if (node.doors) {
-    node.doors.style.setProperty("--door-progress", doorProgress.toFixed(3));
-  }
-
-  let cabinTilt = 0;
-  let cabinShift = 0;
-  if (isMoving && direction !== "idle") {
-    const easing = Math.min(1, 1 / Math.max(currentSpeedFactor, 0.4));
-    const baseTilt = direction === "up" ? -0.65 : 0.65;
-    const baseShift = direction === "up" ? -2.4 : -1.2;
-    cabinTilt = baseTilt * easing;
-    cabinShift = baseShift * easing;
-  }
-  node.cabin.style.setProperty("--cabin-tilt", `${cabinTilt.toFixed(3)}deg`);
-  node.cabin.style.setProperty("--cabin-shift", `${cabinShift.toFixed(3)}px`);
-
-  const loadFactor = ensureNumber(elevator.load_factor);
-  let loadState = "empty";
-  if (loadFactor >= 0.8) {
-    loadState = "full";
-  } else if (loadFactor >= 0.4) {
-    loadState = "mid";
-  } else if (loadFactor > 0.05) {
-    loadState = "light";
-  }
-  node.cabin.dataset.load = loadState;
-
-  if (node.lastTarget !== elevator.target) {
-    node.targetEl.textContent = `→ ${formatTargetFloor(elevator.target)}`;
-    node.cabin.classList.add("flash");
-    if (node.flashTimer) {
-      clearTimeout(node.flashTimer);
-    }
-    const flashDuration = Math.max(240, Math.round(600 / Math.max(currentSpeedFactor, 0.25)));
-    node.flashTimer = window.setTimeout(() => {
-      node.cabin.classList.remove("flash");
-      node.flashTimer = null;
-    }, flashDuration);
-    node.lastTarget = elevator.target;
-  }
-
-  const { min: metaMin, max: metaMax } = sceneState.floorMeta;
-  const rawFloorValue = ensureNumber(elevator.current, metaMin);
-  const currentFloor = Math.min(metaMax, Math.max(metaMin, rawFloorValue));
-  const shaftHeight = node.shaft.clientHeight || sceneState.shaftHeightPx || 0;
-  const baseHeight = sceneState.shaftHeightPx || shaftHeight;
-  const cabinHeight = node.cabin.offsetHeight || sceneState.cabinHeightPx || 0;
-  const halfCabin = cabinHeight / 2;
-  let bottomPx = interpolateFloorMetric(sceneState.floorLevelsPx, currentFloor);
-  const rangeStart = sceneState.floorPixelRange?.start ?? 0;
-  const rangeEndFallback =
-    sceneState.floorPixelRange?.end ??
-    (Number.isFinite(sceneState.travelHeightPx) ? sceneState.travelHeightPx : baseHeight);
-
-  if (!Number.isFinite(bottomPx)) {
-    const boundaryRatioFallback = getFloorBoundaryRatio(currentFloor);
-    if (Number.isFinite(boundaryRatioFallback)) {
-      const rangeSpan = Math.max(0, rangeEndFallback - rangeStart);
-      bottomPx = rangeStart + boundaryRatioFallback * rangeSpan;
-    }
-  }
-
-  if (!Number.isFinite(bottomPx)) {
-    let centerPx = interpolateFloorMetric(sceneState.floorCentersPx, currentFloor);
-    if (!Number.isFinite(centerPx)) {
-      const centerRatioFallback = getFloorCenterRatio(currentFloor);
-      if (Number.isFinite(centerRatioFallback)) {
-        const rangeSpan = Math.max(0, rangeEndFallback - rangeStart);
-        centerPx = rangeStart + centerRatioFallback * rangeSpan;
-      }
-    }
-    if (Number.isFinite(centerPx)) {
-      bottomPx = centerPx - halfCabin;
-    }
-  }
-
-  const travelHeight =
-    Number.isFinite(sceneState.travelHeightPx) && sceneState.travelHeightPx >= 0
-      ? sceneState.travelHeightPx
-      : Math.max(0, shaftHeight - cabinHeight);
-  const rangeEnd = Math.max(rangeStart, Math.min(rangeEndFallback, travelHeight));
-  let clampedBottom = Number.isFinite(bottomPx) ? bottomPx : rangeStart;
-  clampedBottom = Math.max(rangeStart, Math.min(rangeEnd, clampedBottom));
-  node.cabin.style.bottom = `${clampedBottom}px`;
-  node.snapshot = { ...elevator };
-}
-
-function updatePassengerVisuals(passengers) {
-  const passengerList = Array.isArray(passengers) ? passengers : [];
-  const waitingMap = new Map();
-  const elevatorMap = new Map();
-  const seenIds = new Set();
-  let totalWaitingUp = 0;
-  let totalWaitingDown = 0;
-  if (!waitingAreaEl) {
-    passengerRegistry.clear();
-    return;
-  }
-  const layerRect = motionLayer ? motionLayer.getBoundingClientRect() : null;
-
-  passengerList.forEach((raw) => {
-    const snapshot = normalizePassengerSnapshot(raw);
-    if (!snapshot) {
-      return;
-    }
-
-    // 取消的乘客直接从可视化中移除
-    if (snapshot.status === "cancelled") {
-      passengerRegistry.delete(snapshot.id);
-      return;
-    }
-    seenIds.add(snapshot.id);
-    const prev = passengerRegistry.get(snapshot.id);
-    if (prev) {
-      handlePassengerTransition(prev, snapshot, layerRect);
-    }
-    passengerRegistry.set(snapshot.id, snapshot);
-
-    if (snapshot.status === "waiting") {
-      const entry = waitingMap.get(snapshot.origin) || { up: [], down: [] };
-      entry[snapshot.directionKey].push(snapshot);
-      waitingMap.set(snapshot.origin, entry);
-    } else if (snapshot.status === "in_elevator" && snapshot.elevator !== null) {
-      const load = elevatorMap.get(snapshot.elevator) || [];
-      load.push(snapshot);
-      elevatorMap.set(snapshot.elevator, load);
-    }
-  });
-
-  // 移除已经不存在的乘客缓存
-  passengerRegistry.forEach((value, key) => {
-    if (!seenIds.has(key)) {
-      passengerRegistry.delete(key);
-    }
-  });
-
-  waitingNodes.forEach((entry, floor) => {
-    const waitEntry = waitingMap.get(floor) || { up: [], down: [] };
-    totalWaitingUp += waitEntry.up.length;
-    totalWaitingDown += waitEntry.down.length;
-    renderPassengerGroup(entry.up, waitEntry.up, "waiting-up", 10);
-    renderPassengerGroup(entry.down, waitEntry.down, "waiting-down", 10);
-    entry.upCount = waitEntry.up.length;
-    entry.downCount = waitEntry.down.length;
-    entry.root.classList.toggle("inactive", waitEntry.up.length + waitEntry.down.length === 0);
-    if (waitEntry.up.length + waitEntry.down.length === 0 && !entry.highlightTimer) {
-      entry.root.classList.remove("is-boarding", "is-alighting");
-      if (entry.guide) {
-        entry.guide.classList.remove("is-boarding", "is-alighting");
-      }
-      if (entry.label) {
-        entry.label.classList.remove("highlight");
-      }
-    }
-  });
-
-  elevatorNodes.forEach((node, elevatorId) => {
-    const load = elevatorMap.get(elevatorId) || [];
-    renderPassengerGroup(node.passengersEl, load, "in-elevator", 7);
-    node.passengerCount = load.length;
-  });
-
-  if (queueSummaryEl) {
-    const total = totalWaitingUp + totalWaitingDown;
-    if (total === 0) {
-      queueSummaryEl.textContent = "无乘客排队";
-      queueSummaryEl.classList.remove("has-data");
-    } else {
-      queueSummaryEl.textContent = `↑${totalWaitingUp} / ↓${totalWaitingDown}`;
-      queueSummaryEl.classList.add("has-data");
-    }
-  }
-  updateQueueHeadroom();
+  applyScenarioBtn.textContent = scenarioLoading ? "载入中..." : "载入测试";
 }
 
 function updateElevatorCards(elevators) {
@@ -1166,21 +1160,21 @@ function updateElevatorCards(elevators) {
   }
   elevatorContainer.innerHTML = "";
   elevators.forEach((elevator) => {
-    const currentFloor = ensureNumber(elevator.current);
-    const loadPercent = Math.round(ensureNumber(elevator.load_factor) * 100);
-    const passengerCount = ensureNumber(elevator.passenger_count);
+    const currentFloor = ensureNumber(elevator.current, 0);
+    const loadPercent = Math.round(clamp(ensureNumber(elevator.load_factor, 0), 0, 1) * 100);
+    const passengerCount = ensureNumber(elevator.passenger_count, 0);
     const card = document.createElement("div");
     card.className = "card";
     card.innerHTML = `
       <h3>电梯 #${elevator.id}</h3>
-      <span>楼层：${currentFloor.toFixed(1)} → ${formatTargetFloor(
-        elevator.target
-      )}</span>
+      <span>楼层：${currentFloor.toFixed(1)} → ${formatTargetFloor(elevator.target)}</span>
       <span>方向：${translateDirection(elevator.direction)}</span>
-      <span>状态：${translateStatus(elevator.status)}</span>
+      <span>状态：${translateStatus(elevator.status || elevator.run_status)}</span>
       <span>乘客：${passengerCount}人，载重比 ${loadPercent}%</span>
       <span>车内目标：${
-        elevator.pressed_floors.length ? elevator.pressed_floors.join(", ") : "-"
+        Array.isArray(elevator.pressed_floors) && elevator.pressed_floors.length
+          ? elevator.pressed_floors.map((floor) => formatFloorLabelForDisplay(floor)).join(", ")
+          : "-"
       }</span>
     `;
     elevatorContainer.appendChild(card);
@@ -1194,15 +1188,20 @@ function updateFloorTable(floors) {
   floorTableBody.innerHTML = "";
   floors
     .slice()
-    .sort((a, b) => b.floor - a.floor)
+    .sort((a, b) => ensureNumber(b.floor, 0) - ensureNumber(a.floor, 0))
     .forEach((floor) => {
-      const displayFloor = formatFloorLabel(floor.floor);
+      const up = ensureNumber(floor.up_waiting ?? floor.waiting_up ?? floor.waiting_up_count ?? floor.up ?? 0, 0);
+      const down = ensureNumber(
+        floor.down_waiting ?? floor.waiting_down ?? floor.waiting_down_count ?? floor.down ?? 0,
+        0
+      );
+      const total = ensureNumber(floor.total ?? floor.total_waiting ?? up + down, up + down);
       const tr = document.createElement("tr");
       tr.innerHTML = `
-        <td>${displayFloor}</td>
-        <td>${floor.up_waiting}</td>
-        <td>${floor.down_waiting}</td>
-        <td>${floor.total}</td>
+        <td>${formatFloorLabelForDisplay(floor.floor)}</td>
+        <td>${up}</td>
+        <td>${down}</td>
+        <td>${total}</td>
       `;
       floorTableBody.appendChild(tr);
     });
@@ -1215,556 +1214,9 @@ function updateMetrics(metrics) {
   metricsList.innerHTML = "";
   Object.entries(metrics).forEach(([key, value]) => {
     const li = document.createElement("li");
-    li.innerHTML = `<strong>${translateMetric(key)}</strong><br />${formatMetricValue(
-      key,
-      value
-    )}`;
+    li.innerHTML = `<strong>${translateMetric(key)}</strong><br />${formatMetricValue(key, value)}`;
     metricsList.appendChild(li);
   });
-}
-
-function normalizePassengerSnapshot(raw) {
-  if (!raw || raw.id === undefined || raw.id === null) {
-    return null;
-  }
-  const status = String(raw.status || "").toLowerCase();
-  const origin = ensureNumber(raw.origin);
-  const destination = ensureNumber(raw.destination);
-  const direction = destination > origin ? "up" : destination < origin ? "down" : "idle";
-  const directionKey = direction === "down" ? "down" : "up";
-  const elevatorCandidate =
-    raw.elevator ?? raw.current_elevator ?? raw.currentElevator ?? raw.elevator_id ?? raw.elevatorId;
-  let elevator = null;
-  if (typeof elevatorCandidate === "number" && Number.isFinite(elevatorCandidate)) {
-    elevator = elevatorCandidate;
-  } else if (typeof elevatorCandidate === "string" && elevatorCandidate.trim() !== "") {
-    const parsed = Number(elevatorCandidate);
-    if (Number.isFinite(parsed)) {
-      elevator = parsed;
-    }
-  }
-  return {
-    id: Number(raw.id),
-    status,
-    origin,
-    destination,
-    direction,
-    directionKey,
-    elevator: elevator !== null && Number.isFinite(elevator) ? Number(elevator) : null,
-  };
-}
-
-function handlePassengerTransition(prev, next, layerRect) {
-  if (!next || !motionLayer) {
-    return;
-  }
-  const statusChanged = prev?.status !== next.status;
-  const elevatorChanged = prev?.elevator !== next.elevator;
-  const queueChanged = prev?.origin !== next.origin || prev?.directionKey !== next.directionKey;
-  const hasPrev = Boolean(prev);
-  const shouldAnimateBoard =
-    hasPrev &&
-    next.status === "in_elevator" &&
-    next.elevator !== null &&
-    (prev.status === "waiting" || elevatorChanged || queueChanged);
-  const shouldAnimateAlight =
-    hasPrev && prev.status === "in_elevator" && next.status === "completed" && prev.elevator !== null;
-  if (!statusChanged && !shouldAnimateBoard && !shouldAnimateAlight) {
-    return;
-  }
-  const layerRectSafe = layerRect || motionLayer.getBoundingClientRect();
-  if (shouldAnimateBoard && prev) {
-    const floorEntry = waitingNodes.get(prev.origin);
-    const queueEl = floorEntry ? floorEntry[prev.directionKey] : null;
-    const elevatorNode = elevatorNodes.get(next.elevator);
-    if (queueEl && elevatorNode) {
-      if (floorEntry?.root) {
-        floorEntry.root.classList.remove("is-alighting");
-        floorEntry.root.classList.add("is-boarding");
-        if (floorEntry.highlightTimer) {
-          clearTimeout(floorEntry.highlightTimer);
-        }
-        if (floorEntry.label) {
-          floorEntry.label.classList.add("highlight");
-        }
-        const highlightKeep = Math.max(360, Math.round(900 / Math.max(currentSpeedFactor, 0.25)));
-        floorEntry.highlightTimer = window.setTimeout(() => {
-          floorEntry.root.classList.remove("is-boarding");
-          if (floorEntry.guide) {
-            floorEntry.guide.classList.remove("is-boarding");
-          }
-          if (floorEntry.label) {
-            floorEntry.label.classList.remove("highlight");
-          }
-          floorEntry.highlightTimer = null;
-        }, highlightKeep);
-        if (floorEntry.guide) {
-          floorEntry.guide.classList.remove("is-alighting");
-          floorEntry.guide.classList.add("is-boarding");
-        }
-      }
-      if (elevatorNode.cabin) {
-        elevatorNode.cabin.classList.add("boarding");
-        const boardingHold = Math.max(360, Math.round(1100 / Math.max(currentSpeedFactor, 0.25)));
-        window.setTimeout(() => {
-          elevatorNode.cabin.classList.remove("boarding");
-        }, boardingHold);
-      }
-      if (elevatorNode.passengersEl) {
-        elevatorNode.passengersEl.classList.add("is-boarding");
-        window.setTimeout(() => {
-          elevatorNode.passengersEl.classList.remove("is-boarding");
-        }, Math.max(360, Math.round(900 / Math.max(currentSpeedFactor, 0.25))));
-      }
-      const doorTarget =
-        elevatorNode.doors && layerRectSafe
-          ? getElementCenterRelative(elevatorNode.doors, layerRectSafe)
-          : null;
-      spawnPassengerGhost(queueEl, elevatorNode.cabin, `waiting-${prev.directionKey}`, "boarding", layerRectSafe, {
-        duration: 820 + Math.random() * 220,
-        startOffset: { x: (Math.random() - 0.5) * 14, y: -8 + Math.random() * 8 },
-        endOffset: { x: (Math.random() - 0.5) * 12, y: -16 + Math.random() * 12 },
-        overrideEnd: doorTarget || undefined,
-        endOpacity: 0.06,
-      });
-    }
-  } else if (shouldAnimateAlight && prev) {
-    const elevatorNode = elevatorNodes.get(prev.elevator);
-    const floorEntry = waitingNodes.get(next.destination);
-    if (elevatorNode && floorEntry) {
-      if (floorEntry?.root) {
-        floorEntry.root.classList.remove("is-boarding");
-        floorEntry.root.classList.add("is-alighting");
-        if (floorEntry.highlightTimer) {
-          clearTimeout(floorEntry.highlightTimer);
-        }
-        if (floorEntry.label) {
-          floorEntry.label.classList.add("highlight");
-        }
-        const highlightKeep = Math.max(400, Math.round(1000 / Math.max(currentSpeedFactor, 0.25)));
-        floorEntry.highlightTimer = window.setTimeout(() => {
-          floorEntry.root.classList.remove("is-alighting");
-          if (floorEntry.guide) {
-            floorEntry.guide.classList.remove("is-alighting");
-          }
-          if (floorEntry.label) {
-            floorEntry.label.classList.remove("highlight");
-          }
-          floorEntry.highlightTimer = null;
-        }, highlightKeep);
-        if (floorEntry.guide) {
-          floorEntry.guide.classList.remove("is-boarding");
-          floorEntry.guide.classList.add("is-alighting");
-        }
-      }
-      if (elevatorNode.cabin) {
-        elevatorNode.cabin.classList.add("alighting");
-        const alightHold = Math.max(360, Math.round(1100 / Math.max(currentSpeedFactor, 0.25)));
-        window.setTimeout(() => {
-          elevatorNode.cabin.classList.remove("alighting");
-        }, alightHold);
-      }
-      if (elevatorNode.passengersEl) {
-        elevatorNode.passengersEl.classList.add("is-alighting");
-        window.setTimeout(() => {
-          elevatorNode.passengersEl.classList.remove("is-alighting");
-        }, Math.max(360, Math.round(900 / Math.max(currentSpeedFactor, 0.25))));
-      }
-      const doorTarget =
-        elevatorNode.doors && layerRectSafe
-          ? getElementCenterRelative(elevatorNode.doors, layerRectSafe)
-          : null;
-      spawnPassengerGhost(elevatorNode.cabin, floorEntry.root, "departing", "departing", layerRectSafe, {
-        duration: 920 + Math.random() * 240,
-        startOffset: { x: (Math.random() - 0.5) * 22, y: -12 + Math.random() * 10 },
-        endOffset: { x: (Math.random() - 0.5) * 38, y: (Math.random() - 0.5) * 30 },
-        overrideStart: doorTarget || undefined,
-        endOpacity: 0.02,
-      });
-    }
-  } else if (prev.status === "waiting" && next.status === "completed") {
-    const floorEntry = waitingNodes.get(next.destination);
-    if (floorEntry) {
-      spawnPassengerGhost(floorEntry.root, floorEntry.root, "departing", "departing", layerRectSafe, {
-        duration: 520,
-        endOffset: { x: (Math.random() - 0.5) * 20, y: -14 + Math.random() * 6 },
-        endOpacity: 0,
-      });
-    }
-  }
-}
-
-function renderPassengerGroup(container, passengers, variant, maxIcons) {
-  if (!container) {
-    return;
-  }
-  const items = Array.isArray(passengers) ? passengers : [];
-  container.innerHTML = "";
-  const isQueue = variant !== "in-elevator";
-  container.classList.toggle("queue-container", isQueue);
-  container.style.display = items.length ? "flex" : isQueue ? "none" : "flex";
-  if (!items.length) {
-    return;
-  }
-  const iconCount = Math.min(items.length, maxIcons);
-  for (let i = 0; i < iconCount; i += 1) {
-    const passenger = items[i];
-    const icon = document.createElement("span");
-    icon.className = `passenger-icon passenger-shape ${variant}`;
-    icon.style.setProperty("--i", String(i));
-    if (passenger?.direction) {
-      icon.classList.add(`direction-${passenger.direction}`);
-    }
-    if (passenger?.status) {
-      icon.dataset.status = passenger.status;
-    }
-    if (isQueue) {
-      icon.classList.add("queue-icon");
-    } else {
-      icon.classList.add("cabin-icon");
-    }
-    if (passenger?.id !== undefined) {
-      icon.title = `乘客 #${passenger.id}${
-        passenger.destination !== undefined ? ` → ${passenger.destination}` : ""
-      }`;
-    }
-    container.appendChild(icon);
-  }
-  if (items.length > iconCount) {
-    const more = document.createElement("span");
-    more.className = "passenger-more";
-    more.textContent = `+${items.length - iconCount}`;
-    container.appendChild(more);
-  }
-}
-
-function spawnPassengerGhost(startEl, endEl, variant, mode, layerRect, options = {}) {
-  if (!startEl || !endEl || !motionLayer) {
-    return;
-  }
-  const {
-    duration = 720,
-    startOffset = { x: 0, y: 0 },
-    endOffset = { x: 0, y: 0 },
-    overrideStart,
-    overrideEnd,
-    endOpacity = 0.1,
-  } = options;
-
-  const effectiveDuration = Math.max(220, duration / Math.max(currentSpeedFactor, 0.25));
-
-  const startPoint = overrideStart || getElementCenterRelative(startEl, layerRect);
-  const endPoint = overrideEnd || getElementCenterRelative(endEl, layerRect);
-  if (!startPoint || !endPoint) {
-    return;
-  }
-
-  const ghost = document.createElement("div");
-  ghost.className = `passenger-ghost passenger-shape ${variant} ${mode}`;
-  motionLayer.appendChild(ghost);
-  pruneMotionLayer();
-
-  const baseX = endPoint.x + endOffset.x;
-  const baseY = endPoint.y + endOffset.y;
-  const startX = startPoint.x + startOffset.x;
-  const startY = startPoint.y + startOffset.y;
-  const midX = (startX + baseX) / 2 + (Math.random() - 0.5) * 30;
-  const midY = (startY + baseY) / 2 + (Math.random() - 0.5) * 24;
-
-  const deltaStartX = startX - baseX;
-  const deltaStartY = startY - baseY;
-  const deltaMidX = midX - baseX;
-  const deltaMidY = midY - baseY;
-
-  ghost.style.left = `${baseX}px`;
-  ghost.style.top = `${baseY}px`;
-  ghost.style.opacity = 0;
-  ghost.style.transform = `translate(${deltaStartX}px, ${deltaStartY}px) scale(0.86)`;
-
-  if (typeof ghost.animate === "function") {
-    let keyframes;
-    if (mode === "boarding") {
-      const doorX = startX + (baseX - startX) * 0.55 + (Math.random() - 0.5) * 18;
-      const doorY = startY + (baseY - startY) * 0.35 + (Math.random() - 0.5) * 18;
-      const deltaDoorX = doorX - baseX;
-      const deltaDoorY = doorY - baseY;
-      keyframes = [
-        {
-          transform: `translate(${deltaStartX}px, ${deltaStartY}px) scale(0.82)`,
-          opacity: 0,
-        },
-        {
-          transform: `translate(${deltaMidX}px, ${deltaMidY}px) scale(1.02)`,
-          opacity: 0.92,
-          offset: 0.38,
-        },
-        {
-          transform: `translate(${deltaDoorX}px, ${deltaDoorY}px) scale(0.96)`,
-          opacity: 0.86,
-          offset: 0.72,
-        },
-        {
-          transform: `translate(${endOffset.x}px, ${endOffset.y}px) scale(0.92)`,
-          opacity: endOpacity,
-        },
-      ];
-    } else if (mode === "departing") {
-      const doorX = startX + (baseX - startX) * 0.28 + (Math.random() - 0.5) * 22;
-      const doorY = startY + (baseY - startY) * 0.25 + (Math.random() - 0.5) * 18;
-      const crowdX = startX + (baseX - startX) * 0.65 + (Math.random() - 0.5) * 28;
-      const crowdY = startY + (baseY - startY) * 0.6 + (Math.random() - 0.5) * 28;
-      const deltaDoorX = doorX - baseX;
-      const deltaDoorY = doorY - baseY;
-      const deltaCrowdX = crowdX - baseX;
-      const deltaCrowdY = crowdY - baseY;
-      keyframes = [
-        {
-          transform: `translate(${deltaStartX}px, ${deltaStartY}px) scale(0.9)`,
-          opacity: 0.95,
-        },
-        {
-          transform: `translate(${deltaDoorX}px, ${deltaDoorY}px) scale(0.98)`,
-          opacity: 0.9,
-          offset: 0.3,
-        },
-        {
-          transform: `translate(${deltaCrowdX}px, ${deltaCrowdY}px) scale(0.94)`,
-          opacity: 0.7,
-          offset: 0.68,
-        },
-        {
-          transform: `translate(${endOffset.x}px, ${endOffset.y}px) scale(0.9)`,
-          opacity: endOpacity,
-        },
-      ];
-    } else {
-      keyframes = [
-        {
-          transform: `translate(${deltaStartX}px, ${deltaStartY}px) scale(0.86)`,
-          opacity: 0,
-        },
-        {
-          transform: `translate(${deltaMidX}px, ${deltaMidY}px) scale(1)`,
-          opacity: 1,
-          offset: 0.65,
-        },
-        {
-          transform: `translate(${endOffset.x}px, ${endOffset.y}px) scale(0.92)`,
-          opacity: endOpacity,
-        },
-      ];
-    }
-
-    const animation = ghost.animate(keyframes, {
-      duration: effectiveDuration,
-      easing: "cubic-bezier(0.32, 0.01, 0.15, 1)",
-      fill: "forwards",
-    });
-
-    animation.onfinish = () => {
-      ghost.style.transform = `translate(${endOffset.x}px, ${endOffset.y}px) scale(0.92)`;
-      ghost.style.opacity = endOpacity;
-      ghost.classList.add("fading");
-      const cleanupDelay = Math.max(120, Math.round(240 / Math.max(currentSpeedFactor, 0.25)));
-      window.setTimeout(() => ghost.remove(), cleanupDelay);
-    };
-    animation.oncancel = () => ghost.remove();
-  } else {
-    ghost.style.transition = `left ${effectiveDuration}ms cubic-bezier(0.32, 0.01, 0.15, 1), top ${effectiveDuration}ms cubic-bezier(0.32, 0.01, 0.15, 1), opacity ${Math.max(
-      240,
-      420 / Math.max(currentSpeedFactor, 0.25)
-    )}ms ease`;
-    ghost.style.transform = "translate(0, 0)";
-    ghost.style.left = `${startX}px`;
-    ghost.style.top = `${startY}px`;
-    ghost.style.opacity = 0;
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        ghost.style.left = `${baseX}px`;
-        ghost.style.top = `${baseY}px`;
-        ghost.style.opacity = endOpacity;
-        ghost.style.transform = `translate(${endOffset.x}px, ${endOffset.y}px) scale(0.92)`;
-      });
-    });
-    setTimeout(() => {
-      ghost.classList.add("fading");
-    }, Math.max(120, effectiveDuration - Math.max(160, 160 / Math.max(currentSpeedFactor, 0.25))));
-    setTimeout(() => {
-      ghost.remove();
-    }, effectiveDuration + Math.max(200, 260 / Math.max(currentSpeedFactor, 0.25)));
-  }
-}
-
-function getElementCenterRelative(element, layerRect) {
-  if (!element) {
-    return null;
-  }
-  const rect = element.getBoundingClientRect();
-  return {
-    x: rect.left + rect.width / 2 - layerRect.left,
-    y: rect.top + rect.height / 2 - layerRect.top,
-  };
-}
-
-function formatTargetFloor(target) {
-  if (target === null || target === undefined) {
-    return "-";
-  }
-  return target;
-}
-
-function interpolateFloorRatio(ratios, floors, value) {
-  if (!(ratios instanceof Map) || !ratios.size || !Array.isArray(floors) || !floors.length) {
-    return null;
-  }
-  if (ratios.has(value)) {
-    const direct = ratios.get(value);
-    if (Number.isFinite(direct)) {
-      return direct;
-    }
-  }
-  const first = floors[0];
-  const last = floors[floors.length - 1];
-  if (value <= first) {
-    const lower = ratios.get(first);
-    return Number.isFinite(lower) ? lower : null;
-  }
-  if (value >= last) {
-    const upper = ratios.get(last);
-    return Number.isFinite(upper) ? upper : null;
-  }
-  for (let i = 1; i < floors.length; i += 1) {
-    const upperFloor = floors[i];
-    if (upperFloor >= value) {
-      const lowerFloor = floors[i - 1];
-      const lowerRatio = ratios.get(lowerFloor);
-      const upperRatio = ratios.get(upperFloor);
-      if (!Number.isFinite(lowerRatio) || !Number.isFinite(upperRatio)) {
-        break;
-      }
-      const span = upperFloor - lowerFloor;
-      const t = span > 0 ? Math.min(1, Math.max(0, (value - lowerFloor) / span)) : 0;
-      return lowerRatio + (upperRatio - lowerRatio) * t;
-    }
-  }
-  return null;
-}
-
-function getFloorCenterRatio(floorValue) {
-  const ratios = sceneState.floorCenterRatios;
-  const interpolated = interpolateFloorRatio(ratios, sceneState.floorNumbers, floorValue);
-  if (Number.isFinite(interpolated)) {
-    return Math.min(0.98, Math.max(0.02, interpolated));
-  }
-  if (sceneState.floorNumbers.length <= 1) {
-    return 0.5;
-  }
-  const first = sceneState.floorNumbers[0];
-  const last = sceneState.floorNumbers[sceneState.floorNumbers.length - 1];
-  if (!Number.isFinite(first) || !Number.isFinite(last) || first === last) {
-    return 0.5;
-  }
-  const ratio = (floorValue - first) / (last - first);
-  return Math.min(0.98, Math.max(0.02, ratio));
-}
-
-function getFloorBoundaryRatio(floorValue) {
-  const ratios = sceneState.floorBoundaryRatios;
-  const interpolated = interpolateFloorRatio(ratios, sceneState.floorNumbers, floorValue);
-  if (Number.isFinite(interpolated)) {
-    return Math.min(0.995, Math.max(0, interpolated));
-  }
-  if (sceneState.floorNumbers.length <= 1) {
-    return 0.5;
-  }
-  const first = sceneState.floorNumbers[0];
-  const last = sceneState.floorNumbers[sceneState.floorNumbers.length - 1];
-  if (!Number.isFinite(first) || !Number.isFinite(last) || first === last) {
-    return 0.5;
-  }
-  const ratio = (floorValue - first) / (last - first);
-  return Math.min(0.995, Math.max(0, ratio));
-}
-
-function interpolateFloorMetric(metricMap, value) {
-  if (!(metricMap instanceof Map) || !metricMap.size || !Array.isArray(sceneState.floorNumbers) || !sceneState.floorNumbers.length) {
-    return null;
-  }
-  if (metricMap.has(value)) {
-    const direct = metricMap.get(value);
-    if (Number.isFinite(direct)) {
-      return direct;
-    }
-  }
-  const floors = sceneState.floorNumbers;
-  const first = floors[0];
-  const last = floors[floors.length - 1];
-  if (value <= first) {
-    const lower = metricMap.get(first);
-    return Number.isFinite(lower) ? lower : null;
-  }
-  if (value >= last) {
-    const upper = metricMap.get(last);
-    return Number.isFinite(upper) ? upper : null;
-  }
-  for (let i = 1; i < floors.length; i += 1) {
-    const upperFloor = floors[i];
-    if (upperFloor >= value) {
-      const lowerFloor = floors[i - 1];
-      const lowerValue = metricMap.get(lowerFloor);
-      const upperValue = metricMap.get(upperFloor);
-      if (!Number.isFinite(lowerValue) || !Number.isFinite(upperValue)) {
-        break;
-      }
-      const span = upperFloor - lowerFloor;
-      const t = span > 0 ? Math.min(1, Math.max(0, (value - lowerFloor) / span)) : 0;
-      return lowerValue + (upperValue - lowerValue) * t;
-    }
-  }
-  return null;
-}
-
-function formatFloorLabel(rawFloor) {
-  if (!Number.isFinite(rawFloor)) {
-    return `${rawFloor}`;
-  }
-  const minFloor = sceneState.floorNumbers[0];
-  if (typeof minFloor === "number" && minFloor >= 0) {
-    return `${rawFloor + 1}F`;
-  }
-  if (rawFloor < 0) {
-    return `B${Math.abs(rawFloor)}F`;
-  }
-  return `${rawFloor}F`;
-}
-
-function normalizeDirection(direction) {
-  if (direction === "up") {
-    return "up";
-  }
-  if (direction === "down") {
-    return "down";
-  }
-  return "idle";
-}
-
-function ensureNumber(value, fallback = 0) {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value;
-  }
-  return fallback;
-}
-
-function arraysEqual(a, b) {
-  if (a.length !== b.length) {
-    return false;
-  }
-  for (let i = 0; i < a.length; i += 1) {
-    if (a[i] !== b[i]) {
-      return false;
-    }
-  }
-  return true;
 }
 
 function translateDirection(direction) {
@@ -1785,7 +1237,8 @@ function translateStatus(status) {
     constant_speed: "运行",
     stopped: "停止",
   };
-  return map[status] || status;
+  const normalized = typeof status === "string" ? status.toLowerCase() : "";
+  return map[normalized] || normalized || "未知";
 }
 
 function translateMetric(key) {
@@ -1815,6 +1268,26 @@ function formatMetricValue(key, value) {
     return `${value.toFixed(2)} 单位`;
   }
   return value;
+}
+
+function formatFloorLabelForDisplay(floor) {
+  if (stageRenderer) {
+    return stageRenderer.formatFloorLabel(ensureNumber(floor, 0));
+  }
+  if (!Number.isFinite(floor)) {
+    return `${floor}`;
+  }
+  if (floor < 0) {
+    return `B${Math.abs(floor)}F`;
+  }
+  return `${floor}F`;
+}
+
+function formatTargetFloor(target) {
+  if (target === null || target === undefined) {
+    return "-";
+  }
+  return formatFloorLabelForDisplay(target);
 }
 
 function updateControls() {
@@ -1932,17 +1405,19 @@ if (toggleBtn) {
 }
 
 window.addEventListener("resize", () => {
-  requestElevatorSizeUpdate();
-  updateQueueHeadroom();
+  stageRenderer.handleResize();
 });
-window.addEventListener("load", updateQueueHeadroom);
+window.addEventListener("load", () => {
+  stageRenderer.handleResize();
+});
 if (document.fonts?.ready) {
-  document.fonts.ready.then(() => updateQueueHeadroom());
+  document.fonts.ready.then(() => stageRenderer.handleResize());
 }
 
 initializeStageControls();
 initializeSpeedControls();
-updateQueueHeadroom();
+applySpeedStyling();
+stageRenderer.handleResize();
 startPolling(false);
 fetchTrafficCatalog();
 fetchState();
