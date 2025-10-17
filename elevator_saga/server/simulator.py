@@ -7,10 +7,11 @@ import argparse
 import json
 import os.path
 import threading
+from copy import deepcopy
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, cast
+from typing import Any, Dict, List, Optional, cast
 
 from flask import Flask, Response, request
 
@@ -124,6 +125,8 @@ class ElevatorSimulation:
         self.current_traffic_index = 0
         self.traffic_files: List[Path] = []
         self.state: SimulationState = create_empty_simulation_state(2, 1, 1)
+        self._current_building_config: Optional[Dict[str, Any]] = None
+        self._current_traffic_template: List[Dict[str, Any]] = []
         self._load_traffic_files()
 
     @property
@@ -161,67 +164,34 @@ class ElevatorSimulation:
 
     def load_current_traffic(self) -> None:
         """加载当前索引对应的流量文件"""
-        if not self.traffic_files:
-            server_debug_log("No traffic files available")
-            return
-
-        if self.current_traffic_index >= len(self.traffic_files):
-            server_debug_log(f"Traffic index {self.current_traffic_index} out of range")
-            return
-
-        traffic_file = self.traffic_files[self.current_traffic_index]
-        server_debug_log(f"Loading traffic from {traffic_file.name}")
-        try:
-            with open(traffic_file, "r", encoding="utf-8") as f:
-                file_data = json.load(f)
-            building_config = file_data["building"]
-            server_debug_log(f"Building config: {building_config}")
-            self.state = create_empty_simulation_state(
-                building_config["elevators"], building_config["floors"], building_config["elevator_capacity"]
-            )
-            self.reset()
-            self.max_duration_ticks = building_config["duration"]
-            traffic_data: list[Dict[str, Any]] = file_data["traffic"]
-            traffic_data.sort(key=lambda t: cast(int, t["tick"]))
-            for entry in traffic_data:
-                traffic_entry = TrafficEntry(
-                    id=self.next_passenger_id,
-                    origin=entry["origin"],
-                    destination=entry["destination"],
-                    tick=entry["tick"],
-                )
-                self.traffic_queue.append(traffic_entry)
-                self.next_passenger_id += 1
-
-        except Exception as e:
-            server_debug_log(f"Error loading traffic file {traffic_file}: {e}")
+        with self.lock:
+            self._load_traffic_by_index(self.current_traffic_index)
 
     def next_traffic_round(self, full_reset: bool = False) -> bool:
         """切换到下一个流量文件，返回是否成功切换"""
-        if not self.traffic_files:
-            return False
+        with self.lock:
+            if not self.traffic_files:
+                return False
 
-        # 检查是否还有下一个文件
-        next_index = self.current_traffic_index + 1
-        if next_index >= len(self.traffic_files):
-            if full_reset:
-                self.current_traffic_index = -1
-                return self.next_traffic_round()
-            return False  # 没有更多测试案例，停止模拟
+            next_index = self.current_traffic_index + 1
+            if next_index >= len(self.traffic_files):
+                if full_reset:
+                    self.current_traffic_index = 0
+                    return self._load_traffic_by_index(self.current_traffic_index)
+                return False
 
-        self.current_traffic_index = next_index
-        self.load_current_traffic()  # 加载新的流量文件
-        return True
+            self.current_traffic_index = next_index
+            return self._load_traffic_by_index(self.current_traffic_index)
 
     def select_traffic_index(self, target_index: int) -> bool:
         """根据索引直接切换测试用例"""
-        if not self.traffic_files:
-            return False
-        if target_index < 0 or target_index >= len(self.traffic_files):
-            return False
-        self.current_traffic_index = target_index
-        self.load_current_traffic()
-        return True
+        with self.lock:
+            if not self.traffic_files:
+                return False
+            if target_index < 0 or target_index >= len(self.traffic_files):
+                return False
+            self.current_traffic_index = target_index
+            return self._load_traffic_by_index(target_index)
 
     def load_traffic(self, traffic_file: str) -> None:
         """Load passenger traffic from JSON file using unified data models"""
@@ -290,7 +260,7 @@ class ElevatorSimulation:
         # Return events generated this tick
         return self.state.events[events_start:]
 
-    def _process_passenger_in(self, elevator: ElevatorState) -> None:
+    def _process_passenger_in(self, elevator: ElevatorState) -> List[int]:
         current_floor = elevator.current_floor
         # 处于Stopped状态，方向也已经清空，说明没有调度。
         floor = self.floors[current_floor]
@@ -316,10 +286,12 @@ class ElevatorSimulation:
             passenger.pickup_tick = self.tick
             passenger.elevator_id = elevator.id
             elevator.passengers.append(passenger_id)
+            elevator.passenger_destinations[passenger_id] = passenger.destination
             self._emit_event(
                 EventType.PASSENGER_BOARD,
                 {"elevator": elevator.id, "floor": current_floor, "passenger": passenger_id},
             )
+        return passengers_to_board
 
     def _update_elevator_status(self) -> None:
         """更新电梯运行状态"""
@@ -475,6 +447,7 @@ class ElevatorSimulation:
             # 处于Stopped状态，方向也已经清空，说明没有调度。
             if elevator.last_tick_direction == Direction.STOPPED:
                 self._emit_event(EventType.IDLE, {"elevator": elevator.id, "floor": current_floor})
+                self._process_passenger_in(elevator)
                 continue
             # 其他处于STOPPED状态，刚进入stop，到站要进行上下客
             if not elevator.run_status == ElevatorStatus.STOPPED:
@@ -492,14 +465,19 @@ class ElevatorSimulation:
             # Remove passengers who alighted
             for passenger_id in passengers_to_remove:
                 elevator.passengers.remove(passenger_id)
+                elevator.passenger_destinations.pop(passenger_id, None)
                 self._emit_event(
                     EventType.PASSENGER_ALIGHT,
                     {"elevator": elevator.id, "floor": current_floor, "passenger": passenger_id},
                 )
             # Board waiting passengers (if indicators allow)
+            boarded = self._process_passenger_in(elevator)
             if elevator.next_target_floor is not None:
                 self._set_elevator_target_floor(elevator, elevator.next_target_floor)
                 elevator.next_target_floor = None
+            elif boarded and elevator.passengers:
+                # 若仍在当前楼层且没有新的调度指令，保持指示灯熄灭等待控制器分配
+                elevator.indicators.set_direction(Direction.STOPPED)
 
     def _set_elevator_target_floor(self, elevator: ElevatorState, floor: int) -> None:
         """
@@ -522,6 +500,7 @@ class ElevatorSimulation:
         if elevator.current_floor != floor or elevator.position.floor_up_position != 0:
             old_status = elevator.run_status.value
             server_debug_log(f"电梯{elevator.id} 状态:{old_status}->{elevator.run_status.value}")
+        elevator.indicators.set_direction(elevator.target_floor_direction)
 
     def _calculate_distance_to_target(self, elevator: ElevatorState) -> float:
         """计算到目标楼层的距离（以floor_up_position为单位）"""
@@ -647,13 +626,69 @@ class ElevatorSimulation:
     def reset(self) -> None:
         """Reset simulation to initial state"""
         with self.lock:
-            self.state = create_empty_simulation_state(
-                len(self.elevators), len(self.floors), self.elevators[0].max_capacity
-            )
-            self.traffic_queue: List[TrafficEntry] = []
-            self.max_duration_ticks = 0
-            self.next_passenger_id = 1
+            if self._current_building_config is not None:
+                self._initialize_state_with_traffic(
+                    deepcopy(self._current_building_config), deepcopy(self._current_traffic_template)
+                )
+            else:
+                elevators = len(self.elevators) or 1
+                floors = len(self.floors) or 1
+                capacity = self.elevators[0].max_capacity if self.elevators else 10
+                self.state = create_empty_simulation_state(elevators, floors, capacity)
+                self.traffic_queue = []
+                self.max_duration_ticks = 0
+                self.next_passenger_id = 1
 
+    def _initialize_state_with_traffic(
+        self, building_config: Dict[str, Any], traffic_data: List[Dict[str, Any]]
+    ) -> None:
+        """根据楼宇配置和客流数据重新构建模拟状态"""
+        elevators = max(1, int(building_config.get("elevators", 1)))
+        floors = max(1, int(building_config.get("floors", 1)))
+        capacity = max(1, int(building_config.get("elevator_capacity", 1)))
+
+        self.state = create_empty_simulation_state(elevators, floors, capacity)
+        self.state.events.clear()
+        self.state.passengers.clear()
+        self.traffic_queue = []
+        self.next_passenger_id = 1
+        self.max_duration_ticks = int(building_config.get("duration", 0) or 0)
+
+        sorted_entries = sorted(traffic_data, key=lambda t: cast(int, t.get("tick", 0)))
+        for entry in sorted_entries:
+            passenger_id = int(entry.get("id", self.next_passenger_id))
+            origin = int(entry["origin"])
+            destination = int(entry["destination"])
+            tick = int(entry["tick"])
+            traffic_entry = TrafficEntry(id=passenger_id, origin=origin, destination=destination, tick=tick)
+            self.traffic_queue.append(traffic_entry)
+            self.next_passenger_id = max(self.next_passenger_id, passenger_id + 1)
+
+    def _load_traffic_by_index(self, index: int) -> bool:
+        if not self.traffic_files:
+            server_debug_log("No traffic files available")
+            return False
+        if index < 0 or index >= len(self.traffic_files):
+            server_debug_log(f"Traffic index {index} out of range")
+            return False
+
+        traffic_file = self.traffic_files[index]
+        server_debug_log(f"Loading traffic from {traffic_file.name}")
+        try:
+            with open(traffic_file, "r", encoding="utf-8") as f:
+                file_data = json.load(f)
+            building_config = file_data["building"]
+            server_debug_log(f"Building config: {building_config}")
+            traffic_data: List[Dict[str, Any]] = list(file_data["traffic"])
+            self._current_building_config = cast(Dict[str, Any], deepcopy(building_config))
+            self._current_traffic_template = cast(List[Dict[str, Any]], deepcopy(traffic_data))
+            self._initialize_state_with_traffic(
+                deepcopy(self._current_building_config), deepcopy(self._current_traffic_template)
+            )
+            return True
+        except Exception as e:
+            server_debug_log(f"Error loading traffic file {traffic_file}: {e}")
+            return False
 
 # Global simulation instance for Flask routes
 simulation: ElevatorSimulation = ElevatorSimulation("", _init_only=True)

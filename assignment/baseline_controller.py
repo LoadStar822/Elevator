@@ -111,7 +111,8 @@ class GreedyNearestController(ElevatorController):
                     break
                 time.sleep(0.3)
                 state = self.api_client.get_state(force_reload=True)
-                self._update_wrappers(state)
+                # 测试案例切换后电梯/楼层数量可能发生变化，需要重新初始化代理
+                self._update_wrappers(state, init=True)
                 self._update_traffic_info()
                 refresh_attempts += 1
             if self.current_traffic_max_tick == 0:
@@ -224,8 +225,12 @@ class GreedyNearestController(ElevatorController):
         ):
             request.assigned_elevator = elevator.id
             return
+        current_target = getattr(elevator, "target_floor", None)
         already_scheduled = self.dispatch_history[elevator.id][-1:] == [target]
-        if already_scheduled and elevator.target_floor == target:
+        is_moving_towards_target = (
+            current_target == target and elevator.run_status.name.lower() != "stopped"
+        )
+        if already_scheduled and is_moving_towards_target:
             return
         if elevator.go_to_floor(target):
             self.dispatch_history[elevator.id].append(target)
