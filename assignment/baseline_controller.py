@@ -153,11 +153,11 @@ class GreedyNearestController(ElevatorController):
                 self.api_client.mark_tick_processed()
 
                 if should_stop:
-                    pprint(state.metrics.to_dict())
+                    self._print_final_metrics(state)
                     self.is_running = False
                     break
                 if self.current_tick >= self.current_traffic_max_tick:
-                    pprint(state.metrics.to_dict())
+                    self._print_final_metrics(state)
                     break
 
         except Exception as exc:
@@ -359,6 +359,21 @@ class GreedyNearestController(ElevatorController):
         ):
             return False
         return True
+
+    def _print_final_metrics(self, state: SimulationState) -> None:
+        """输出最终指标与评测结算Tick"""
+        pprint(state.metrics.to_dict())
+        last_arrive_tick = 0
+        if state.passengers:
+            last_arrive_tick = max(passenger.arrive_tick for passenger in state.passengers.values())
+        floor_count = len(state.floors)
+        per_floor_buffer = 2 * 2 * 5
+        settlement_tick = last_arrive_tick + floor_count * per_floor_buffer
+        print(
+            f"评测结算Tick: {settlement_tick} "
+            f"(最后乘客出现Tick={last_arrive_tick}, 楼层数={floor_count}, 单层补偿={per_floor_buffer}, "
+            f"公式: 最晚出现Tick + 楼层数×单层补偿)"
+        )
 
     def _elevator_can_serve_request(self, elevator: ProxyElevator, request: PendingRequest) -> bool:
         served = getattr(elevator, "served_floors", None)

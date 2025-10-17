@@ -498,13 +498,20 @@ function translateMetric(key) {
     p95_arrival_wait_time: "P95 总等待",
     total_energy_consumption: "总能耗",
     energy_per_completed_passenger: "人均能耗",
+    last_passenger_tick: "最后乘客出现Tick",
+    settlement_tick: "评测结算Tick",
   };
   return map[key] || key;
 }
 
 function formatMetricValue(key, value) {
-  if (typeof value === "number" && key && key.includes("wait")) {
-    return `${value.toFixed(1)} tick`;
+  if (typeof value === "number" && key) {
+    if (key.includes("wait")) {
+      return `${value.toFixed(1)} tick`;
+    }
+    if (key.endsWith("_tick") || key === "tick") {
+      return `${Math.round(value)} tick`;
+    }
   }
   return value;
 }

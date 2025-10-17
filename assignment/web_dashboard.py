@@ -228,6 +228,11 @@ def _collect_state() -> Dict[str, object]:
         d1 = sorted_vals[c] * (k - f)
         return round(d0 + d1, 2)
 
+    last_arrive_tick = max((psg.arrive_tick or 0) for psg in passengers) if passengers else 0
+    floor_count = len(state.floors)
+    per_floor_buffer = 2 * 2 * 5
+    settlement_tick = last_arrive_tick + floor_count * per_floor_buffer
+
     metrics = {
         "total_passengers": len(passengers),
         "completed_passengers": len(completed),
@@ -235,6 +240,8 @@ def _collect_state() -> Dict[str, object]:
         "p95_floor_wait_time": _percentile(floor_waits, 0.95),
         "average_arrival_wait_time": _average(arrival_waits),
         "p95_arrival_wait_time": _percentile(arrival_waits, 0.95),
+        "last_passenger_tick": last_arrive_tick,
+        "settlement_tick": settlement_tick,
     }
     metrics["total_energy_consumption"] = getattr(state.metrics, "total_energy_consumption", 0.0)
     metrics["energy_per_completed_passenger"] = getattr(state.metrics, "energy_per_completed_passenger", 0.0)
