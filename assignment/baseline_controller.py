@@ -19,7 +19,7 @@ from pprint import pprint
 
 from elevator_saga.client.base_controller import ElevatorController
 from elevator_saga.client.proxy_models import ProxyElevator, ProxyFloor, ProxyPassenger
-from elevator_saga.core.models import Direction, SimulationEvent
+from elevator_saga.core.models import Direction, SimulationEvent, SimulationState, PassengerStatus
 
 
 @dataclass
@@ -148,9 +148,14 @@ class GreedyNearestController(ElevatorController):
                 state = self.api_client.get_state()
                 self._update_wrappers(state)
 
+                should_stop = self._should_terminate(state)
                 self.on_event_execute_end(self.current_tick, events, self.elevators, self.floors)
                 self.api_client.mark_tick_processed()
 
+                if should_stop:
+                    pprint(state.metrics.to_dict())
+                    self.is_running = False
+                    break
                 if self.current_tick >= self.current_traffic_max_tick:
                     pprint(state.metrics.to_dict())
                     break
@@ -331,6 +336,29 @@ class GreedyNearestController(ElevatorController):
             self._adjust_pending_count(previous, -1)
         request.assigned_elevator = None
         request.assigned_tick = None
+
+    def _should_terminate(self, state: SimulationState) -> bool:
+        if self.waiting_requests:
+            return False
+        if any(counter for counter in self.drop_targets.values()):
+            return False
+        if any(self.pending_assignments_count.get(e.id, 0) for e in state.elevators):
+            return False
+        if any(elevator.passengers for elevator in state.elevators):
+            return False
+        if any(floor.total_waiting for floor in state.floors):
+            return False
+        metrics = state.metrics
+        if metrics.total_passengers == 0:
+            return False
+        if metrics.completed_passengers < metrics.total_passengers:
+            return False
+        if any(
+            passenger.status not in (PassengerStatus.COMPLETED, PassengerStatus.CANCELLED)
+            for passenger in state.passengers.values()
+        ):
+            return False
+        return True
 
     def _elevator_can_serve_request(self, elevator: ProxyElevator, request: PendingRequest) -> bool:
         served = getattr(elevator, "served_floors", None)
