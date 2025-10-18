@@ -3,6 +3,7 @@
 Elevator simulation server - tick-based discrete event simulation
 Provides HTTP API for controlling elevators and advancing simulation time
 """
+
 import argparse
 import json
 import os.path
@@ -157,15 +158,63 @@ class ElevatorSimulation:
                 self.traffic_files.append(file_path)
         # 按文件名排序
         self.traffic_files.sort()
-        server_debug_log(f"Found {len(self.traffic_files)} traffic files: {[f.name for f in self.traffic_files]}")
+        server_debug_log(
+            f"Found {len(self.traffic_files)} traffic files: {[f.name for f in self.traffic_files]}"
+        )
         # 如果有文件，加载第一个
         if self.traffic_files:
             self.load_current_traffic()
 
     def load_current_traffic(self) -> None:
         """加载当前索引对应的流量文件"""
-        with self.lock:
-            self._load_traffic_by_index(self.current_traffic_index)
+        if not self.traffic_files:
+            server_debug_log("No traffic files available")
+            return
+
+        if self.current_traffic_index >= len(self.traffic_files):
+            server_debug_log(f"Traffic index {self.current_traffic_index} out of range")
+            return
+
+        traffic_file = self.traffic_files[self.current_traffic_index]
+        server_debug_log(f"Loading traffic from {traffic_file.name}")
+        try:
+            with open(traffic_file, "r", encoding="utf-8") as f:
+                file_data = json.load(f)
+            building_config = file_data["building"]
+            server_debug_log(f"Building config: {building_config}")
+            self.state = create_empty_simulation_state(
+                building_config["elevators"],
+                building_config["floors"],
+                building_config["elevator_capacity"],
+            )
+            self.reset()
+
+            # 设置电梯能耗率
+            elevator_energy_rates = building_config.get(
+                "elevator_energy_rates", [1.0] * building_config["elevators"]
+            )
+            for i, elevator in enumerate(self.state.elevators):
+                if i < len(elevator_energy_rates):
+                    elevator.energy_rate = elevator_energy_rates[i]
+                    server_debug_log(
+                        f"电梯 E{elevator.id} 能耗率设置为: {elevator.energy_rate}"
+                    )
+
+            self.max_duration_ticks = building_config["duration"]
+            traffic_data: list[Dict[str, Any]] = file_data["traffic"]
+            traffic_data.sort(key=lambda t: cast(int, t["tick"]))
+            for entry in traffic_data:
+                traffic_entry = TrafficEntry(
+                    id=self.next_passenger_id,
+                    origin=entry["origin"],
+                    destination=entry["destination"],
+                    tick=entry["tick"],
+                )
+                self.traffic_queue.append(traffic_entry)
+                self.next_passenger_id += 1
+
+        except Exception as e:
+            server_debug_log(f"Error loading traffic file {traffic_file}: {e}")
 
     def next_traffic_round(self, full_reset: bool = False) -> bool:
         """切换到下一个流量文件，返回是否成功切换"""
@@ -198,7 +247,9 @@ class ElevatorSimulation:
         with open(traffic_file, "r") as f:
             traffic_data = json.load(f)
 
-        server_debug_log(f"Loading traffic from {traffic_file}, {len(traffic_data)} entries")
+        server_debug_log(
+            f"Loading traffic from {traffic_file}, {len(traffic_data)} entries"
+        )
 
         self.traffic_queue: List[TrafficEntry] = []  # type: ignore[reportRedeclaration]
         for entry in traffic_data:
@@ -214,7 +265,9 @@ class ElevatorSimulation:
 
         # Sort by arrival time
         self.traffic_queue.sort(key=lambda p: p.tick)
-        server_debug_log(f"Traffic loaded and sorted, next passenger ID: {self.next_passenger_id}")
+        server_debug_log(
+            f"Traffic loaded and sorted, next passenger ID: {self.next_passenger_id}"
+        )
 
     def _emit_event(self, event_type: EventType, data: Dict[str, Any]) -> None:
         """Emit an event to be sent to clients using unified data models"""
@@ -235,9 +288,13 @@ class ElevatorSimulation:
                 if self.tick >= self.max_duration_ticks:
                     completed_count = self.force_complete_remaining_passengers()
                     if completed_count > 0:
-                        server_debug_log(f"模拟结束，强制完成了 {completed_count} 个乘客")
+                        server_debug_log(
+                            f"模拟结束，强制完成了 {completed_count} 个乘客"
+                        )
 
-            server_debug_log(f"Step completed - Final tick: {self.tick}, Total events: {len(new_events)}")
+            server_debug_log(
+                f"Step completed - Final tick: {self.tick}, Total events: {len(new_events)}"
+            )
             return new_events
 
     def _process_tick(self) -> List[SimulationEvent]:
@@ -267,14 +324,20 @@ class ElevatorSimulation:
         passengers_to_board: List[int] = []
         remaining_capacity = elevator.max_capacity - len(elevator.passengers)
         # Board passengers going up (if up indicator is on or no direction set)
-        if remaining_capacity > 0 and elevator.target_floor_direction in (Direction.UP, Direction.STOPPED):
+        if remaining_capacity > 0 and elevator.target_floor_direction in (
+            Direction.UP,
+            Direction.STOPPED,
+        ):
             take_up = floor.up_queue[:remaining_capacity]
             passengers_to_board.extend(take_up)
             floor.up_queue = floor.up_queue[len(take_up) :]
             remaining_capacity -= len(take_up)
 
         # Board passengers going down (if down indicator is on or no direction set)
-        if remaining_capacity > 0 and elevator.target_floor_direction in (Direction.DOWN, Direction.STOPPED):
+        if remaining_capacity > 0 and elevator.target_floor_direction in (
+            Direction.DOWN,
+            Direction.STOPPED,
+        ):
             take_down = floor.down_queue[:remaining_capacity]
             passengers_to_board.extend(take_down)
             floor.down_queue = floor.down_queue[len(take_down) :]
@@ -289,7 +352,11 @@ class ElevatorSimulation:
             elevator.passenger_destinations[passenger_id] = passenger.destination
             self._emit_event(
                 EventType.PASSENGER_BOARD,
-                {"elevator": elevator.id, "floor": current_floor, "passenger": passenger_id},
+                {
+                    "elevator": elevator.id,
+                    "floor": current_floor,
+                    "passenger": passenger_id,
+                },
             )
         return passengers_to_board
 
@@ -301,7 +368,9 @@ class ElevatorSimulation:
             # 没有移动方向，说明电梯已经到达目标楼层
             if elevator.target_floor_direction == Direction.STOPPED:
                 if elevator.next_target_floor is not None:
-                    self._set_elevator_target_floor(elevator, elevator.next_target_floor)
+                    self._set_elevator_target_floor(
+                        elevator, elevator.next_target_floor
+                    )
 
                     self._process_passenger_in(elevator)
                     elevator.next_target_floor = None
@@ -332,15 +401,23 @@ class ElevatorSimulation:
                 destination=traffic_entry.destination,
                 arrive_tick=self.tick,
             )
-            assert traffic_entry.origin != traffic_entry.destination, f"乘客{passenger.id}目的地和起始地{traffic_entry.origin}重复"
+            assert traffic_entry.origin != traffic_entry.destination, (
+                f"乘客{passenger.id}目的地和起始地{traffic_entry.origin}重复"
+            )
             self.passengers[passenger.id] = passenger
             server_debug_log(f"乘客 {passenger.id:4}： 创建 | {passenger}")
             if passenger.destination > passenger.origin:
                 self.floors[passenger.origin].up_queue.append(passenger.id)
-                self._emit_event(EventType.UP_BUTTON_PRESSED, {"floor": passenger.origin, "passenger": passenger.id})
+                self._emit_event(
+                    EventType.UP_BUTTON_PRESSED,
+                    {"floor": passenger.origin, "passenger": passenger.id},
+                )
             else:
                 self.floors[passenger.origin].down_queue.append(passenger.id)
-                self._emit_event(EventType.DOWN_BUTTON_PRESSED, {"floor": passenger.origin, "passenger": passenger.id})
+                self._emit_event(
+                    EventType.DOWN_BUTTON_PRESSED,
+                    {"floor": passenger.origin, "passenger": passenger.id},
+                )
 
     def _move_elevators(self) -> None:
         """
@@ -366,13 +443,20 @@ class ElevatorSimulation:
             old_position = elevator.position.current_floor_float
             if elevator.target_floor_direction == Direction.UP:
                 new_floor = elevator.position.floor_up_position_add(movement_speed)
+                # 电梯移动时增加能耗，每tick增加电梯的能耗率
+                elevator.energy_consumed += elevator.energy_rate
             elif elevator.target_floor_direction == Direction.DOWN:
                 new_floor = elevator.position.floor_up_position_add(-movement_speed)
+                # 电梯移动时增加能耗，每tick增加电梯的能耗率
+                elevator.energy_consumed += elevator.energy_rate
             else:
                 # 之前的状态已经是到站了，清空上一次到站的方向
                 pass
             new_position = elevator.position.current_floor_float
-            if new_position != old_position and elevator.target_floor_direction != Direction.STOPPED:
+            if (
+                new_position != old_position
+                and elevator.target_floor_direction != Direction.STOPPED
+            ):
                 elevator.energy_consumed += self._calculate_step_energy_cost(
                     elevator, movement_speed, old_position, new_position
                 )
@@ -424,19 +508,13 @@ class ElevatorSimulation:
                 elevator.run_status = ElevatorStatus.STOPPED
                 # 刚进入Stopped状态，可以通过last_direction识别
                 self._emit_event(
-                    EventType.STOPPED_AT_FLOOR, {"elevator": elevator.id, "floor": new_floor, "reason": "move_reached"}
+                    EventType.STOPPED_AT_FLOOR,
+                    {
+                        "elevator": elevator.id,
+                        "floor": new_floor,
+                        "reason": "move_reached",
+                    },
                 )
-            # elevator.energy_consumed += abs(direction * elevator.speed_pre_tick) * 0.5
-
-    @staticmethod
-    def _calculate_step_energy_cost(
-        elevator: ElevatorState, movement_speed: int, old_position: float, new_position: float
-    ) -> float:
-        """根据单个tick的移动估算能耗"""
-        if movement_speed <= 0 or new_position == old_position:
-            return 0.0
-        base_cost = 2.0 if elevator.id == 3 else 1.0
-        return base_cost
 
     def _process_elevator_stops(self) -> None:
         """
@@ -446,7 +524,9 @@ class ElevatorSimulation:
             current_floor = elevator.current_floor
             # 处于Stopped状态，方向也已经清空，说明没有调度。
             if elevator.last_tick_direction == Direction.STOPPED:
-                self._emit_event(EventType.IDLE, {"elevator": elevator.id, "floor": current_floor})
+                self._emit_event(
+                    EventType.IDLE, {"elevator": elevator.id, "floor": current_floor}
+                )
                 self._process_passenger_in(elevator)
                 continue
             # 其他处于STOPPED状态，刚进入stop，到站要进行上下客
@@ -468,7 +548,11 @@ class ElevatorSimulation:
                 elevator.passenger_destinations.pop(passenger_id, None)
                 self._emit_event(
                     EventType.PASSENGER_ALIGHT,
-                    {"elevator": elevator.id, "floor": current_floor, "passenger": passenger_id},
+                    {
+                        "elevator": elevator.id,
+                        "floor": current_floor,
+                        "passenger": passenger_id,
+                    },
                 )
             # Board waiting passengers (if indicators allow)
             boarded = self._process_passenger_in(elevator)
@@ -494,17 +578,23 @@ class ElevatorSimulation:
                 elevator.run_status = ElevatorStatus.CONSTANT_SPEED
                 server_debug_log(f"电梯 E{elevator.id} 被设定为匀速")
         elif new_target_floor_should_accel:
-            if elevator.run_status == ElevatorStatus.CONSTANT_SPEED:  # 应该减速了，但是之前是匀速
+            if (
+                elevator.run_status == ElevatorStatus.CONSTANT_SPEED
+            ):  # 应该减速了，但是之前是匀速
                 elevator.run_status = ElevatorStatus.START_DOWN
                 server_debug_log(f"电梯 E{elevator.id} 被设定为减速")
         if elevator.current_floor != floor or elevator.position.floor_up_position != 0:
             old_status = elevator.run_status.value
-            server_debug_log(f"电梯{elevator.id} 状态:{old_status}->{elevator.run_status.value}")
+            server_debug_log(
+                f"电梯{elevator.id} 状态:{old_status}->{elevator.run_status.value}"
+            )
         elevator.indicators.set_direction(elevator.target_floor_direction)
 
     def _calculate_distance_to_target(self, elevator: ElevatorState) -> float:
         """计算到目标楼层的距离（以floor_up_position为单位）"""
-        current_pos = elevator.position.current_floor * 10 + elevator.position.floor_up_position
+        current_pos = (
+            elevator.position.current_floor * 10 + elevator.position.floor_up_position
+        )
         target_pos = elevator.target_floor * 10
         return abs(target_pos - current_pos)
 
@@ -529,7 +619,9 @@ class ElevatorSimulation:
         distance = self._calculate_distance_to_near_stop(elevator)
         return distance == 1
 
-    def elevator_go_to_floor(self, elevator_id: int, floor: int, immediate: bool = False) -> None:
+    def elevator_go_to_floor(
+        self, elevator_id: int, floor: int, immediate: bool = False
+    ) -> None:
         """
         设置电梯去向，是生命周期开始，分配目的地
         """
@@ -558,9 +650,19 @@ class ElevatorSimulation:
     def _calculate_metrics(self) -> PerformanceMetrics:
         """Calculate performance metrics"""
         # 直接从state中筛选已完成的乘客
-        completed = [p for p in self.state.passengers.values() if p.status == PassengerStatus.COMPLETED]
+        completed = [
+            p
+            for p in self.state.passengers.values()
+            if p.status == PassengerStatus.COMPLETED
+        ]
 
         total_passengers = len(self.state.passengers)
+
+        # 计算总能耗
+        total_energy = sum(
+            elevator.energy_consumed for elevator in self.state.elevators
+        )
+
         if not completed:
             return PerformanceMetrics(
                 completed_passengers=0,
@@ -569,15 +671,16 @@ class ElevatorSimulation:
                 p95_floor_wait_time=0,
                 average_arrival_wait_time=0,
                 p95_arrival_wait_time=0,
-                total_energy_consumption=0.0,
-                energy_per_completed_passenger=0.0,
+                total_energy_consumption=total_energy,
             )
 
         floor_wait_times = [float(p.floor_wait_time) for p in completed]
         arrival_wait_times = [float(p.arrival_wait_time) for p in completed]
         total_energy = sum(e.energy_consumed for e in self.elevators)
 
-        def average_excluding_top_percent(data: List[float], exclude_percent: int) -> float:
+        def average_excluding_top_percent(
+            data: List[float], exclude_percent: int
+        ) -> float:
             """计算排除掉最长的指定百分比后的平均值"""
             if not data:
                 return 0.0
@@ -593,12 +696,15 @@ class ElevatorSimulation:
         return PerformanceMetrics(
             completed_passengers=len(completed),
             total_passengers=total_passengers,
-            average_floor_wait_time=sum(floor_wait_times) / len(floor_wait_times) if floor_wait_times else 0,
+            average_floor_wait_time=sum(floor_wait_times) / len(floor_wait_times)
+            if floor_wait_times
+            else 0,
             p95_floor_wait_time=average_excluding_top_percent(floor_wait_times, 5),
-            average_arrival_wait_time=sum(arrival_wait_times) / len(arrival_wait_times) if arrival_wait_times else 0,
+            average_arrival_wait_time=sum(arrival_wait_times) / len(arrival_wait_times)
+            if arrival_wait_times
+            else 0,
             p95_arrival_wait_time=average_excluding_top_percent(arrival_wait_times, 5),
             total_energy_consumption=total_energy,
-            energy_per_completed_passenger=total_energy / len(completed) if completed else 0.0,
         )
 
     def get_events(self, since_tick: int = 0) -> List[SimulationEvent]:
@@ -628,7 +734,8 @@ class ElevatorSimulation:
         with self.lock:
             if self._current_building_config is not None:
                 self._initialize_state_with_traffic(
-                    deepcopy(self._current_building_config), deepcopy(self._current_traffic_template)
+                    deepcopy(self._current_building_config),
+                    deepcopy(self._current_traffic_template),
                 )
             else:
                 elevators = len(self.elevators) or 1
@@ -660,7 +767,9 @@ class ElevatorSimulation:
             origin = int(entry["origin"])
             destination = int(entry["destination"])
             tick = int(entry["tick"])
-            traffic_entry = TrafficEntry(id=passenger_id, origin=origin, destination=destination, tick=tick)
+            traffic_entry = TrafficEntry(
+                id=passenger_id, origin=origin, destination=destination, tick=tick
+            )
             self.traffic_queue.append(traffic_entry)
             self.next_passenger_id = max(self.next_passenger_id, passenger_id + 1)
 
@@ -680,15 +789,21 @@ class ElevatorSimulation:
             building_config = file_data["building"]
             server_debug_log(f"Building config: {building_config}")
             traffic_data: List[Dict[str, Any]] = list(file_data["traffic"])
-            self._current_building_config = cast(Dict[str, Any], deepcopy(building_config))
-            self._current_traffic_template = cast(List[Dict[str, Any]], deepcopy(traffic_data))
+            self._current_building_config = cast(
+                Dict[str, Any], deepcopy(building_config)
+            )
+            self._current_traffic_template = cast(
+                List[Dict[str, Any]], deepcopy(traffic_data)
+            )
             self._initialize_state_with_traffic(
-                deepcopy(self._current_building_config), deepcopy(self._current_traffic_template)
+                deepcopy(self._current_building_config),
+                deepcopy(self._current_traffic_template),
             )
             return True
         except Exception as e:
             server_debug_log(f"Error loading traffic file {traffic_file}: {e}")
             return False
+
 
 # Global simulation instance for Flask routes
 simulation: ElevatorSimulation = ElevatorSimulation("", _init_only=True)
@@ -723,7 +838,9 @@ def step_simulation() -> Response | tuple[Response, int]:
         # server_debug_log("")
         # server_debug_log(f"HTTP /api/step request ----- ticks: {ticks}")
         events = simulation.step(ticks)
-        server_debug_log(f"HTTP /api/step response ----- tick: {simulation.tick}, events: {len(events)}\n")
+        server_debug_log(
+            f"HTTP /api/step response ----- tick: {simulation.tick}, events: {len(events)}\n"
+        )
         return json_response(
             {
                 "tick": simulation.tick,
@@ -764,7 +881,9 @@ def next_traffic_round() -> Response | tuple[Response, int]:
         if success:
             return json_response({"success": True})
         else:
-            return json_response({"success": False, "error": "No traffic files available"}, 400)
+            return json_response(
+                {"success": False, "error": "No traffic files available"}, 400
+            )
     except Exception as e:
         return json_response({"error": str(e)}, 500)
 
@@ -778,10 +897,14 @@ def select_traffic() -> Response | tuple[Response, int]:
         try:
             target_index = int(index_raw)
         except (TypeError, ValueError):
-            return json_response({"success": False, "error": "Invalid traffic index"}, 400)
+            return json_response(
+                {"success": False, "error": "Invalid traffic index"}, 400
+            )
         success = simulation.select_traffic_index(target_index)
         if not success:
-            return json_response({"success": False, "error": "Traffic index out of range"}, 400)
+            return json_response(
+                {"success": False, "error": "Traffic index out of range"}, 400
+            )
         return json_response({"success": True})
     except Exception as e:
         return json_response({"error": str(e)}, 500)
@@ -803,7 +926,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Elevator Simulation Server")
     parser.add_argument("--host", default="127.0.0.1", help="Server host")
     parser.add_argument("--port", type=int, default=8000, help="Server port")
-    parser.add_argument("--debug", default=True, action="store_true", help="Enable debug logging")
+    parser.add_argument(
+        "--debug", default=True, action="store_true", help="Enable debug logging"
+    )
 
     args = parser.parse_args()
 
@@ -814,7 +939,9 @@ def main() -> None:
         app.config["DEBUG"] = True
 
     # Create simulation with traffic directory
-    simulation = ElevatorSimulation(f"{os.path.join(os.path.dirname(__file__), '..', 'traffic')}")
+    simulation = ElevatorSimulation(
+        f"{os.path.join(os.path.dirname(__file__), '..', 'traffic')}"
+    )
 
     # Print traffic status
     print(f"Elevator simulation server running on http://{args.host}:{args.port}")

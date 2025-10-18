@@ -3,12 +3,24 @@
 Elevator Saga Data Models
 统一的数据模型定义，用于客户端和服务器的类型一致性和序列化
 """
+
 import json
 import uuid
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple, Type, TypeVar, Union, get_args, get_origin
+from typing import (
+    Any,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    Type,
+    TypeVar,
+    Union,
+    get_args,
+    get_origin,
+)
 
 # 类型变量
 T = TypeVar("T", bound="SerializableModel")
@@ -51,7 +63,9 @@ class EventType(Enum):
     DOWN_BUTTON_PRESSED = "down_button_pressed"
     PASSING_FLOOR = "passing_floor"
     STOPPED_AT_FLOOR = "stopped_at_floor"
-    ELEVATOR_APPROACHING = "elevator_approaching"  # 电梯即将经过某层楼（START_DOWN状态）
+    ELEVATOR_APPROACHING = (
+        "elevator_approaching"  # 电梯即将经过某层楼（START_DOWN状态）
+    )
     IDLE = "idle"
     PASSENGER_BOARD = "passenger_board"
     PASSENGER_ALIGHT = "passenger_alight"
@@ -166,8 +180,10 @@ class SerializableModel:
                 except (TypeError, ValueError):
                     return value
 
-        if hasattr(field_type, "from_dict") and callable(getattr(field_type, "from_dict", None)) and isinstance(
-            value, dict
+        if (
+            hasattr(field_type, "from_dict")
+            and callable(getattr(field_type, "from_dict", None))
+            and isinstance(value, dict)
         ):
             return field_type.from_dict(value)
 
@@ -287,8 +303,11 @@ class ElevatorState(SerializableModel):
     run_status: ElevatorStatus = ElevatorStatus.STOPPED
     last_tick_direction: Direction = Direction.STOPPED
     indicators: ElevatorIndicators = field(default_factory=ElevatorIndicators)
-    passenger_destinations: Dict[int, int] = field(default_factory=dict)  # 乘客ID -> 目的地楼层映射
+    passenger_destinations: Dict[int, int] = field(
+        default_factory=dict
+    )  # 乘客ID -> 目的地楼层映射
     energy_consumed: float = 0.0
+    energy_rate: float = 1.0  # 能耗率：每tick消耗的能量单位
     last_update_tick: int = 0
 
     @property
@@ -341,7 +360,11 @@ class ElevatorState(SerializableModel):
     @property
     def is_running(self) -> bool:
         """是否正在运行"""
-        return self.run_status in [ElevatorStatus.START_UP, ElevatorStatus.START_DOWN, ElevatorStatus.CONSTANT_SPEED]
+        return self.run_status in [
+            ElevatorStatus.START_UP,
+            ElevatorStatus.START_DOWN,
+            ElevatorStatus.CONSTANT_SPEED,
+        ]
 
     @property
     def pressed_floors(self) -> List[int]:
@@ -416,7 +439,6 @@ class PerformanceMetrics(SerializableModel):
     average_arrival_wait_time: float = 0.0
     p95_arrival_wait_time: float = 0.0
     total_energy_consumption: float = 0.0
-    energy_per_completed_passenger: float = 0.0
 
     @property
     def completion_rate(self) -> float:
@@ -424,13 +446,6 @@ class PerformanceMetrics(SerializableModel):
         if self.total_passengers == 0:
             return 0.0
         return self.completed_passengers / self.total_passengers
-
-    # @property
-    # def energy_per_passenger(self) -> float:
-    #     """每位乘客能耗"""
-    #     if self.completed_passengers == 0:
-    #         return 0.0
-    #     return self.total_energy_consumption / self.completed_passengers
 
 
 @dataclass
@@ -598,14 +613,21 @@ class TrafficPattern(SerializableModel):
 # ==================== 便捷构造函数 ====================
 
 
-def create_empty_simulation_state(elevators: int, floors: int, max_capacity: int) -> SimulationState:
+def create_empty_simulation_state(
+    elevators: int, floors: int, max_capacity: int
+) -> SimulationState:
     """创建空的模拟状态"""
-    elevator_states = [ElevatorState(id=i, position=Position(), max_capacity=max_capacity) for i in range(elevators)]
+    elevator_states = [
+        ElevatorState(id=i, position=Position(), max_capacity=max_capacity)
+        for i in range(elevators)
+    ]
     floor_states = [FloorState(floor=i) for i in range(floors)]
     return SimulationState(tick=0, elevators=elevator_states, floors=floor_states)
 
 
-def create_simple_traffic_pattern(name: str, passengers: List[Tuple[int, int, int]]) -> TrafficPattern:
+def create_simple_traffic_pattern(
+    name: str, passengers: List[Tuple[int, int, int]]
+) -> TrafficPattern:
     """创建简单流量模式
 
     Args:
@@ -618,5 +640,7 @@ def create_simple_traffic_pattern(name: str, passengers: List[Tuple[int, int, in
         entries.append(entry)
 
     return TrafficPattern(
-        name=name, description=f"Simple traffic pattern with {len(passengers)} passengers", entries=entries
+        name=name,
+        description=f"Simple traffic pattern with {len(passengers)} passengers",
+        entries=entries,
     )
