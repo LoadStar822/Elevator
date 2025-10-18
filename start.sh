@@ -48,8 +48,42 @@ if [ ! -d "${VENV_DIR}" ]; then
   python3 -m venv "${VENV_DIR}"
 fi
 
+find_activate_script() {
+  # 支持 Unix 和 Windows 虚拟环境目录结构，优先选择可执行激活脚本
+  if [ -f "${VENV_DIR}/bin/activate" ]; then
+    ACTIVATE_SCRIPT="${VENV_DIR}/bin/activate"
+  elif [ -f "${VENV_DIR}/Scripts/activate" ]; then
+    ACTIVATE_SCRIPT="${VENV_DIR}/Scripts/activate"
+  elif [ -f "${VENV_DIR}/Scripts/activate.bat" ]; then
+    ACTIVATE_SCRIPT="${VENV_DIR}/Scripts/activate.bat"
+  else
+    ACTIVATE_SCRIPT=""
+  fi
+}
+
+ACTIVATE_SCRIPT=""
+find_activate_script
+
+if [ -z "${ACTIVATE_SCRIPT}" ]; then
+  echo "未找到虚拟环境激活脚本，尝试重新创建..."
+  rm -rf "${VENV_DIR}"
+  python3 -m venv "${VENV_DIR}"
+  find_activate_script
+fi
+
+if [ -z "${ACTIVATE_SCRIPT}" ]; then
+  echo "虚拟环境创建失败：未能找到激活脚本。" >&2
+  exit 1
+fi
+
 # shellcheck disable=SC1090
-source "${VENV_DIR}/bin/activate"
+if [[ "${ACTIVATE_SCRIPT}" == *.bat ]]; then
+  echo "检测到 Windows 批处理激活脚本，请手动调用：${ACTIVATE_SCRIPT}"
+  exit 1
+else
+  # 使用 POSIX 兼容激活脚本
+  source "${ACTIVATE_SCRIPT}"
+fi
 
 if [ ! -f "${VENV_DIR}/.deps_installed" ]; then
   echo "升级 pip 并安装项目依赖..."
