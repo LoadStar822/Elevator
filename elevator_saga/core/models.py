@@ -5,10 +5,10 @@ Elevator Saga Data Models
 """
 import json
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple, Type, TypeVar, Union
+from typing import Any, Dict, List, Optional, Tuple, Type, TypeVar, Union, get_args, get_origin
 
 # 类型变量
 T = TypeVar("T", bound="SerializableModel")
@@ -72,18 +72,25 @@ class SerializableModel:
     @classmethod
     def from_dict(cls: Type[T], data: Dict[str, Any]) -> T:
         """从字典创建实例"""
-        # 过滤掉init=False的字段
-        import inspect
+        if not isinstance(data, dict):
+            raise TypeError(f"from_dict expects dict, got {type(data)!r}")
 
-        sig = inspect.signature(cls.__init__)
-        valid_params = set(sig.parameters.keys()) - {"self"}
+        init_kwargs: Dict[str, Any] = {}
+        post_init_values: Dict[str, Any] = {}
+        for field_info in fields(cls):
+            if field_info.name not in data:
+                continue
+            converted_value = cls._convert_value(field_info.type, data[field_info.name])
+            if field_info.init:
+                init_kwargs[field_info.name] = converted_value
+            else:
+                post_init_values[field_info.name] = converted_value
 
-        filtered_data = {k: v for k, v in data.items() if k in valid_params}
-        instance = cls(**filtered_data)
-        for k, v in cls.__dict__.items():
-            if issubclass(v.__class__, Enum):  # 要求不能为None
-                value = getattr(instance, k)
-                setattr(instance, k, v.__class__(value))
+        instance = cls(**init_kwargs)
+
+        for name, value in post_init_values.items():
+            setattr(instance, name, value)
+
         return instance
 
     @classmethod
@@ -102,6 +109,69 @@ class SerializableModel:
         elif hasattr(obj, "to_dict"):
             return obj.to_dict()
         return str(obj)
+
+    @classmethod
+    def _convert_value(cls, field_type: Any, value: Any) -> Any:
+        """根据字段类型转换值，处理枚举、嵌套模型和容器类型"""
+        if value is None:
+            return None
+
+        origin = get_origin(field_type)
+        args = get_args(field_type)
+
+        if origin is Union:
+            non_none_args = [arg for arg in args if arg is not type(None)]
+            if not non_none_args:
+                return value
+            for arg in non_none_args:
+                try:
+                    return cls._convert_value(arg, value)
+                except (TypeError, ValueError):
+                    continue
+            return value
+
+        if origin in (list, List):
+            item_type = args[0] if args else Any
+            if not isinstance(value, list):
+                return value
+            return [cls._convert_value(item_type, item) for item in value]
+
+        if origin in (dict, Dict):
+            key_type = args[0] if args else Any
+            value_type = args[1] if len(args) > 1 else Any
+            if not isinstance(value, dict):
+                return value
+            return {
+                cls._convert_value(key_type, key): cls._convert_value(value_type, val)
+                for key, val in value.items()
+            }
+
+        if isinstance(field_type, type):
+            if issubclass(field_type, Enum):
+                if isinstance(value, field_type):
+                    return value
+                return field_type(value)
+
+            if issubclass(field_type, SerializableModel):
+                if isinstance(value, field_type):
+                    return value
+                if isinstance(value, dict):
+                    return field_type.from_dict(value)
+
+            if field_type in (int, float, str, bool):
+                if isinstance(value, field_type):
+                    return value
+                try:
+                    return field_type(value)
+                except (TypeError, ValueError):
+                    return value
+
+        if hasattr(field_type, "from_dict") and callable(getattr(field_type, "from_dict", None)) and isinstance(
+            value, dict
+        ):
+            return field_type.from_dict(value)
+
+        return value
 
 
 @dataclass
@@ -194,6 +264,14 @@ class PassengerInfo(SerializableModel):
             return Direction.DOWN
         else:
             return Direction.STOPPED
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = super().to_dict()
+        data["status"] = self.status.value
+        data["travel_direction"] = self.travel_direction.value
+        data["floor_wait_time"] = self.floor_wait_time
+        data["arrival_wait_time"] = self.arrival_wait_time
+        return data
 
 
 @dataclass
@@ -337,7 +415,8 @@ class PerformanceMetrics(SerializableModel):
     p95_floor_wait_time: float = 0.0
     average_arrival_wait_time: float = 0.0
     p95_arrival_wait_time: float = 0.0
-    # total_energy_consumption: float = 0.0
+    total_energy_consumption: float = 0.0
+    energy_per_completed_passenger: float = 0.0
 
     @property
     def completion_rate(self) -> float:

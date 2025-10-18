@@ -2,50 +2,159 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <title>电梯调度可视化看板</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>电梯调度体验中枢</title>
     <link rel="stylesheet" href="/static/style.css" />
   </head>
-<body>
-    <header>
-      <div class="header-left">
-        <h1>电梯调度可视化看板</h1>
-        <div id="meta">
-          <span id="tick">Tick: --</span>
-          <span id="last-update">上次更新：--</span>
+  <body>
+    <div class="app-shell">
+      <header class="app-header">
+        <div class="brand-block">
+          <h1>电梯调度体验中枢</h1>
+          <p class="brand-subtitle">实时洞察调度策略表现，专注乘客体验</p>
         </div>
-      </div>
-      <div id="controls">
-        <span id="controller-status" class="status status-idle">未运行</span>
-        <button id="toggle-controller">启动调度</button>
-      </div>
-    </header>
-    <main>
-      <section>
-        <h2>电梯状态</h2>
-        <div id="elevator-cards" class="card-container"></div>
+        <div class="status-group" role="status" aria-live="polite">
+          <div class="meta-stack">
+            <span class="meta-label">当前 Tick</span>
+            <span id="tick" class="meta-value">--</span>
+          </div>
+          <div class="meta-stack">
+            <span class="meta-label">上次更新</span>
+            <span id="last-update" class="meta-value">--</span>
+          </div>
+          <span id="controller-status" class="status status-idle">未运行</span>
+        </div>
+        <div class="header-actions">
+          <button id="toggle-controller" class="primary-btn">启动调度</button>
+        </div>
+      </header>
+
+      <section class="app-toolbar" aria-label="配置面板">
+        <div class="toolbar-group">
+          <div class="toolbar-title">
+            <span class="toolbar-label">测试用例</span>
+            <span id="scenario-meta" class="scenario-meta">当前测试：--</span>
+          </div>
+          <div class="toolbar-controls">
+            <label for="scenario-select" class="sr-only">选择测试用例</label>
+            <select id="scenario-select" aria-label="选择测试用例"></select>
+            <span class="toolbar-hint">选择后自动应用</span>
+          </div>
+        </div>
+        <div class="toolbar-group speed">
+          <span class="toolbar-label">播放速度</span>
+          <div id="speed-controls" class="speed-controls" role="group" aria-label="播放速度">
+            <button type="button" class="speed-btn active" data-speed="1">1×</button>
+            <button type="button" class="speed-btn" data-speed="1.5">1.5×</button>
+            <button type="button" class="speed-btn" data-speed="2">2×</button>
+            <button type="button" class="speed-btn" data-speed="3">3×</button>
+          </div>
+        </div>
       </section>
-      <section>
-        <h2>楼层排队情况</h2>
-        <table id="floor-table">
-          <thead>
-            <tr>
-              <th>楼层</th>
-              <th>上行等待</th>
-              <th>下行等待</th>
-              <th>总计</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-      </section>
-      <section>
-        <h2>关键指标</h2>
-        <ul id="metrics-list"></ul>
-      </section>
-    </main>
-    <footer>
-      <span>数据来源：http://127.0.0.1:8000</span>
-    </footer>
+
+      <main class="dashboard">
+        <section id="overview-section" class="panel overview-panel">
+          <header class="panel-header">
+            <h2>运行概览</h2>
+            <span id="overview-update" class="panel-subtitle">上次更新：--</span>
+          </header>
+          <div class="overview-grid">
+            <article class="overview-card">
+              <span class="overview-label">当前 Tick</span>
+              <span class="overview-value" id="overview-tick">--</span>
+              <span class="overview-hint">系统渲染节拍</span>
+            </article>
+            <article class="overview-card">
+              <span class="overview-label">调度状态</span>
+              <span class="overview-value" id="overview-status" data-state="idle">未运行</span>
+              <span class="overview-hint" id="overview-traffic">当前测试：--</span>
+            </article>
+            <article class="overview-card">
+              <span class="overview-label">候梯人数</span>
+              <span class="overview-value" id="overview-waiting">--</span>
+              <span class="overview-hint" id="overview-metrics">平均等候 -- tick</span>
+            </article>
+            <article class="overview-card">
+              <span class="overview-label">完成情况</span>
+              <span class="overview-value" id="overview-completed">--</span>
+              <span class="overview-hint" id="overview-completion-rate">完成率 --</span>
+            </article>
+          </div>
+        </section>
+
+        <div class="dashboard-grid">
+          <section id="visual-section" class="panel stage-panel" aria-labelledby="visual-heading">
+            <header class="panel-header">
+          <div>
+            <h2 id="visual-heading">实时场景</h2>
+            <span id="stage-traffic" class="panel-subtitle">当前测试：--</span>
+          </div>
+          <div class="panel-meta">
+            <span class="panel-chip">监控刷新率 <strong>900ms</strong></span>
+          </div>
+        </header>
+        <div id="stage-mini-map" class="stage-mini-map"></div>
+        <div id="simple-stage" class="simple-stage" data-empty="true" aria-live="polite">
+              <div class="stage-header">
+                <span class="stage-floor-label stage-header-cell">楼层</span>
+                <div id="stage-elevator-headings" class="stage-elevator-headings"></div>
+                <span class="stage-waiting-label stage-header-cell">候梯</span>
+              </div>
+              <div id="stage-floor-list" class="stage-floor-list"></div>
+            </div>
+            <footer class="stage-legend" aria-label="图例说明">
+              <span class="stage-legend-item">青色格表示电梯所在楼层</span>
+              <span class="stage-legend-item">↑ / ↓ 显示等待方向人数</span>
+              <span class="stage-legend-item">小人图标反映乘客数量</span>
+            </footer>
+          </section>
+
+          <aside class="insight-stack" aria-label="辅助指标">
+            <section id="elevator-section" class="panel insight-panel">
+              <header class="panel-header">
+                <h2>电梯状态</h2>
+                <span class="panel-subtitle">实时同步</span>
+              </header>
+              <div id="elevator-cards" class="card-container"></div>
+            </section>
+
+            <section id="floor-section" class="panel insight-panel">
+              <header class="panel-header">
+                <h2>楼层排队</h2>
+                <span class="panel-subtitle">上下行分布</span>
+              </header>
+              <div class="table-wrapper">
+                <table id="floor-table">
+                  <thead>
+                    <tr>
+                      <th scope="col">楼层</th>
+                      <th scope="col">上行</th>
+                      <th scope="col">下行</th>
+                      <th scope="col">总计</th>
+                    </tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+            </section>
+
+            <section id="metrics-section" class="panel insight-panel">
+              <header class="panel-header">
+                <h2>关键指标</h2>
+                <span class="panel-subtitle">等待体验</span>
+              </header>
+              <ul id="metrics-list" class="metrics-list"></ul>
+            </section>
+          </aside>
+        </div>
+      </main>
+
+      <footer class="app-footer">
+        <span>数据来源：http://127.0.0.1:8000</span>
+        <span>若调度异常，可重新载入测试用例或重启调度</span>
+      </footer>
+    </div>
+
     <script src="/static/main.js"></script>
   </body>
 </html>

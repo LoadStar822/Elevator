@@ -1,0 +1,26 @@
+{
+  "building": {
+    "floors": 10,
+    "elevators": 2,
+    "elevator_capacity": 10,
+    "scenario": "icss79_two_down",
+    "scale": "small",
+    "description": "两名乘客分别在9层与4层下行至0层",
+    "expected_passengers": 2,
+    "duration": 400
+  },
+  "traffic": [
+    {
+      "id": 1,
+      "origin": 9,
+      "destination": 0,
+      "tick": 0
+    },
+    {
+      "id": 2,
+      "origin": 4,
+      "destination": 0,
+      "tick": 0
+    }
+  ]
+}

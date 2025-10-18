@@ -200,6 +200,21 @@ class ElevatorAPIClient:
             debug_log(f"Next traffic round failed: {e}")
             return False
 
+    def select_traffic(self, index: int) -> bool:
+        """直接切换到指定编号的流量文件"""
+        try:
+            response_data = self._send_post_request("/api/traffic/select", {"index": index})
+            success = bool(response_data.get("success", False))
+            if success:
+                self._cached_state = None
+                self._cached_tick = -1
+                self._tick_processed = False
+                debug_log("Cache cleared after traffic selection")
+            return success
+        except Exception as e:
+            debug_log(f"Select traffic failed: {e}")
+            return False
+
     def get_traffic_info(self) -> Optional[Dict[str, Any]]:
         """获取当前流量文件信息"""
         try:

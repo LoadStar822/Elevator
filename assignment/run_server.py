@@ -15,7 +15,12 @@ def main() -> None:
     simulator.set_server_debug_mode(False)
     simulator.app.config["DEBUG"] = False
 
-    traffic_dir = os.path.join(os.path.dirname(simulator.__file__), "..", "traffic")
+    project_root = os.path.dirname(os.path.dirname(simulator.__file__))
+    custom_dir = os.path.join(project_root, "data", "scenarios")
+    if os.path.isdir(custom_dir):
+        traffic_dir = custom_dir
+    else:
+        traffic_dir = os.path.join(project_root, "traffic")
     simulator.simulation = simulator.ElevatorSimulation(traffic_dir)
 
     simulator.app.run(host="127.0.0.1", port=8000, debug=False, threaded=True)
