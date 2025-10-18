@@ -10,6 +10,24 @@ import logging
 from elevator_saga.server import simulator
 
 
+def _ensure_energy_cost_patch() -> None:
+    """在运行时补齐旧版本模拟器缺失的能耗计算方法。"""
+
+    if hasattr(simulator.ElevatorSimulation, "_calculate_step_energy_cost"):
+        return
+
+    def _calculate_step_energy_cost(elevator, movement_speed: int, old_position: float, new_position: float) -> float:
+        if movement_speed <= 0 or new_position == old_position:
+            return 0.0
+        base_cost = 2.0 if elevator.id == 3 else 1.0
+        return base_cost
+
+    simulator.ElevatorSimulation._calculate_step_energy_cost = staticmethod(_calculate_step_energy_cost)  # type: ignore[attr-defined]
+
+
+_ensure_energy_cost_patch()
+
+
 def main() -> None:
     logging.getLogger("werkzeug").setLevel(logging.ERROR)
     simulator.set_server_debug_mode(False)

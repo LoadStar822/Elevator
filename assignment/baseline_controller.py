@@ -1,25 +1,156 @@
 #!/usr/bin/env python3
 """
-首版调度算法：基于最近楼层的贪心派梯策略
+改进版调度算法：两层 Trip 规划 + 事件驱动插站
 
-核心策略：
-1. 记录所有等待乘客的呼叫（按乘客维度去重）
-2. 电梯若有乘客，则优先送达车内乘客的最近目的地
-3. 电梯空载时，选择与当前楼层距离最近、尚未被其他电梯抢占的呼叫
+核心特点：
+1. 将一次完整行程抽象为 Trip，携带方向、走廊区间、停靠序列与容量预占。
+2. 通过楼层快照判定上/下行高峰或均衡模式，动态划分服务分区。
+3. Trip 层负责离线式分配：成段规划、目的地分桶、预留容量避免超载。
+4. 事件层利用 PASSING_FLOOR / APPROACHING 即时插站，支持 immediate 调度。
+5. 空闲电梯按分区驻站，能耗较高的电梯延迟唤醒。
 """
 from __future__ import annotations
 
+import math
 import os
 import time
-from collections import Counter
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
-
-from pprint import pprint
+from collections import Counter, deque
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple
 
 from elevator_saga.client.base_controller import ElevatorController
 from elevator_saga.client.proxy_models import ProxyElevator, ProxyFloor, ProxyPassenger
 from elevator_saga.core.models import Direction, SimulationEvent, SimulationState, PassengerStatus
+
+
+class TrafficMode(Enum):
+    """电梯运行模式枚举"""
+
+    UP_PEAK = auto()
+    DOWN_PEAK = auto()
+    INTERFLOOR = auto()
+
+
+@dataclass
+class FloorDemand:
+    """楼层的上下行需求聚合"""
+
+    up_count: int = 0
+    down_count: int = 0
+    up_destinations: Counter = field(default_factory=Counter)
+    down_destinations: Counter = field(default_factory=Counter)
+
+
+@dataclass
+class Trip:
+    """封装一次完整趟次的调度信息"""
+
+    direction: Direction
+    corridor_low: int
+    corridor_high: int
+    stops: Deque[int] = field(default_factory=deque)
+    reserved_pickups: Dict[int, int] = field(default_factory=dict)
+    reserved_passengers: Set[int] = field(default_factory=set)
+    current_stop: Optional[int] = None
+
+    def has_pending(self) -> bool:
+        return self.current_stop is not None or bool(self.stops)
+
+    def peek_next(self) -> Optional[int]:
+        if self.current_stop is not None:
+            return self.current_stop
+        if self.stops:
+            return self.stops[0]
+        return None
+
+    def pop_next(self) -> Optional[int]:
+        if self.current_stop is not None:
+            return self.current_stop
+        if not self.stops:
+            return None
+        self.current_stop = self.stops.popleft()
+        return self.current_stop
+
+    def mark_stop_completed(self, floor: int) -> None:
+        if self.current_stop == floor:
+            self.current_stop = None
+        else:
+            self.stops = deque(f for f in self.stops if f != floor)
+
+    def add_stop(self, floor: int, *, to_front: bool = False) -> None:
+        if floor == self.current_stop:
+            return
+        if to_front:
+            if floor in self.stops:
+                self.stops = deque([floor] + [f for f in self.stops if f != floor])
+            else:
+                self.stops.appendleft(floor)
+            return
+        if floor in self.stops:
+            return
+        if self.direction == Direction.UP:
+            self._insert_ascending(floor)
+        elif self.direction == Direction.DOWN:
+            self._insert_descending(floor)
+        else:
+            self.stops.append(floor)
+
+    def replace_current_stop(self, new_floor: int) -> None:
+        if self.current_stop == new_floor:
+            return
+        previous = self.current_stop
+        if previous is not None:
+            if previous not in self.stops:
+                self.stops.appendleft(previous)
+            else:
+                self.stops = deque([previous] + [f for f in self.stops if f != previous])
+        if new_floor in self.stops:
+            self.stops = deque(f for f in self.stops if f != new_floor)
+        self.current_stop = new_floor
+
+    def total_reserved_boarding(self) -> int:
+        return sum(self.reserved_pickups.values())
+
+    def adjust_reservation(self, floor: int, delta: int, passenger_id: Optional[int] = None) -> None:
+        if delta == 0:
+            return
+        self.reserved_pickups[floor] = self.reserved_pickups.get(floor, 0) + delta
+        if self.reserved_pickups[floor] <= 0:
+            self.reserved_pickups.pop(floor, None)
+        if passenger_id is not None:
+            if delta > 0:
+                self.reserved_passengers.add(passenger_id)
+            else:
+                self.reserved_passengers.discard(passenger_id)
+
+    def clear_reservations(self) -> None:
+        self.reserved_pickups.clear()
+        self.reserved_passengers.clear()
+
+    def _insert_ascending(self, floor: int) -> None:
+        inserted = False
+        new_stops: Deque[int] = deque()
+        for existing in self.stops:
+            if not inserted and floor < existing:
+                new_stops.append(floor)
+                inserted = True
+            new_stops.append(existing)
+        if not inserted:
+            new_stops.append(floor)
+        self.stops = new_stops
+
+    def _insert_descending(self, floor: int) -> None:
+        inserted = False
+        new_stops: Deque[int] = deque()
+        for existing in self.stops:
+            if not inserted and floor > existing:
+                new_stops.append(floor)
+                inserted = True
+            new_stops.append(existing)
+        if not inserted:
+            new_stops.append(floor)
+        self.stops = new_stops
 
 
 @dataclass
@@ -35,19 +166,11 @@ class PendingRequest:
     assigned_tick: Optional[int] = None
 
     def priority_key(self, reference_floor: int) -> Tuple[int, int]:
-        """根据参考楼层计算优先级键值"""
         return abs(self.origin - reference_floor), self.origin
 
 
 class GreedyNearestController(ElevatorController):
-    """
-    最近楼层优先的贪心调度器
-
-    简要思路：
-    - 使用 passenger_id 去重，避免重复响应同一名乘客的上下行事件
-    - 电梯完成停靠后会立即尝试分配下一目标楼层
-    - 当楼内等待乘客为空时，电梯回到首层待命
-    """
+    """Trip 驱动调度器，实现两层调度体系"""
 
     def __init__(
         self,
@@ -59,12 +182,20 @@ class GreedyNearestController(ElevatorController):
         self.waiting_requests: Dict[int, PendingRequest] = {}
         self.last_known_tick: int = 0
         self.dispatch_history: Dict[int, List[int]] = {}
-        self.default_idle_floor: int = 0
-        self.drop_targets: Dict[int, Counter[int]] = {}
         self.pending_assignments_count: Dict[int, int] = {}
         self.pending_targets: Dict[int, Optional[int]] = {}
         self.reassign_after_ticks: int = 4
-        # 从环境变量读取 tick 间隔，默认 0.2s 便于可视化观察
+        self.active_trips: Dict[int, Trip] = {}
+        self.floor_snapshot: Dict[int, FloorDemand] = {}
+        self.mode: TrafficMode = TrafficMode.INTERFLOOR
+        self.zone_bounds: Dict[int, Tuple[int, int]] = {}
+        self.idle_station_map: Dict[int, int] = {}
+        self.base_floor: int = 0
+        self.top_floor: int = 0
+        self.target_load_factor: float = 0.8
+        self.heavy_elevators: Set[int] = {3}
+        self.heavy_activation_ratio: float = 0.7
+        self.energy_weight: Dict[int, float] = {}
         if tick_delay is not None:
             self.tick_delay = tick_delay
         else:
@@ -78,29 +209,32 @@ class GreedyNearestController(ElevatorController):
     def on_init(self, elevators: List[ProxyElevator], floors: List[ProxyFloor]) -> None:
         self.waiting_requests.clear()
         self.dispatch_history = {e.id: [] for e in elevators}
-        self.drop_targets = {e.id: Counter() for e in elevators}
         self.pending_assignments_count = {e.id: 0 for e in elevators}
         self.pending_targets = {e.id: None for e in elevators}
-        if floors:
-            self.default_idle_floor = floors[0].floor
+        self.active_trips.clear()
+        self.base_floor = floors[0].floor if floors else 0
+        self.top_floor = floors[-1].floor if floors else 0
+        self.mode = TrafficMode.INTERFLOOR
+        self.zone_bounds = {e.id: (self.base_floor, self.top_floor) for e in elevators}
+        self._compute_idle_layout(elevators)
+        self.energy_weight = {e.id: (2.0 if e.id in self.heavy_elevators else 1.0) for e in elevators}
         print(f"初始化完成：{len(elevators)} 部电梯，服务楼层 {len(floors)} 层")
 
     def on_event_execute_start(
         self, tick: int, events: List[SimulationEvent], elevators: List[ProxyElevator], floors: List[ProxyFloor]
     ) -> None:
         self.last_known_tick = tick
-        if self.debug:
+        if self.debug and events:
             joined = ", ".join(event.type.value for event in events)
             print(f"[Tick {tick}] 事件：{joined}")
 
     def on_event_execute_end(
         self, tick: int, events: List[SimulationEvent], elevators: List[ProxyElevator], floors: List[ProxyFloor]
     ) -> None:
-        # 通过短暂休眠让可视化界面有足够时间采样状态
         if self.tick_delay > 0:
             time.sleep(self.tick_delay)
 
-    # ========= 自定义运行循环，避免自动重置 ========= #
+    # ========= 自定义运行循环（保持与原基类一致） ========= #
     def _run_event_driven_simulation(self) -> None:  # type: ignore[override]
         try:
             state = self.api_client.get_state()
@@ -117,7 +251,6 @@ class GreedyNearestController(ElevatorController):
                     break
                 time.sleep(0.3)
                 state = self.api_client.get_state(force_reload=True)
-                # 测试案例切换后电梯/楼层数量可能发生变化，需要重新初始化代理
                 self._update_wrappers(state, init=True)
                 self._update_traffic_info()
                 refresh_attempts += 1
@@ -177,34 +310,32 @@ class GreedyNearestController(ElevatorController):
             self.waiting_requests[passenger.id] = request
             if self.debug:
                 print(f"记录呼叫：乘客 {passenger.id} @F{floor.floor} -> F{passenger.destination}")
+        self._refresh_operational_context()
         self._wake_idle_elevators()
 
     def on_elevator_idle(self, elevator: ProxyElevator) -> None:
-        self._assign_next_target(elevator)
+        self.pending_targets[elevator.id] = None
+        self._assign_trip_or_idle(elevator)
 
     def on_elevator_stopped(self, elevator: ProxyElevator, floor: ProxyFloor) -> None:
-        self._assign_next_target(elevator)
+        trip = self.active_trips.get(elevator.id)
+        if trip:
+            trip.mark_stop_completed(floor.floor)
+        self.pending_targets[elevator.id] = None
+        self._assign_trip_or_idle(elevator)
 
     def on_passenger_board(self, elevator: ProxyElevator, passenger: ProxyPassenger) -> None:
         request = self.waiting_requests.pop(passenger.id, None)
         if request is not None:
             self._clear_request_assignment(request)
-        self.drop_targets[elevator.id][passenger.destination] += 1
-        if self.debug:
-            print(f"乘客 {passenger.id} 已乘坐电梯 {elevator.id}")
-        # 重新调度该电梯，优先送达车内乘客或继续接单
-        self._assign_next_target(elevator)
+            trip = self.active_trips.get(elevator.id)
+            if trip:
+                trip.adjust_reservation(request.origin, -1, passenger.id)
+        self._refresh_operational_context()
         self._wake_idle_elevators()
 
     def on_passenger_alight(self, elevator: ProxyElevator, passenger: ProxyPassenger, floor: ProxyFloor) -> None:
-        counter = self.drop_targets.get(elevator.id)
-        if counter and counter[passenger.destination] > 0:
-            counter[passenger.destination] -= 1
-            if counter[passenger.destination] <= 0:
-                del counter[passenger.destination]
-        if self.debug:
-            wait = self.last_known_tick - passenger.arrive_tick
-            print(f"乘客 {passenger.id} 在 F{floor.floor} 下梯，总等待 {wait} tick")
+        self._refresh_operational_context()
         self._wake_idle_elevators()
 
     def on_stop(self) -> None:
@@ -213,134 +344,403 @@ class GreedyNearestController(ElevatorController):
             print(f"剩余等待乘客: {len(self.waiting_requests)}")
 
     def on_elevator_passing_floor(self, elevator: ProxyElevator, floor: ProxyFloor, direction: str) -> None:
-        pass
+        self._attempt_inline_stop(elevator, floor.floor, Direction[direction.upper()])
 
     def on_elevator_approaching(self, elevator: ProxyElevator, floor: ProxyFloor, direction: str) -> None:
-        pass
+        self._attempt_inline_stop(elevator, floor.floor, Direction[direction.upper()])
 
-    # ========= 内部调度逻辑 ========= #
-    def _wake_idle_elevators(self) -> None:
-        """有新需求时唤醒空闲电梯"""
-        for elevator in self.elevators:
-            if elevator.run_status.name.lower() == "stopped" and not elevator.passengers:
-                self._assign_next_target(elevator)
+    # ========= Trip 规划与调度 ========= #
+    def _assign_trip_or_idle(self, elevator: ProxyElevator) -> None:
+        trip = self.active_trips.get(elevator.id)
+        if trip and trip.has_pending():
+            self._dispatch_next_stop(elevator, trip)
+            return
+        if trip:
+            self._release_trip(elevator.id)
+        new_trip = self._plan_trip_for_elevator(elevator)
+        if new_trip and new_trip.has_pending():
+            self.active_trips[elevator.id] = new_trip
+            self._dispatch_next_stop(elevator, new_trip)
+            return
+        self._send_elevator_to_idle(elevator)
 
-    def _assign_next_target(self, elevator: ProxyElevator) -> None:
-        """为指定电梯选择下一目标楼层"""
-        pending_command = self.pending_targets.get(elevator.id)
-        if pending_command is not None and elevator.current_floor == pending_command:
-            self.pending_targets[elevator.id] = None
-
-        target, request = self._pick_next_destination(elevator)
+    def _dispatch_next_stop(self, elevator: ProxyElevator, trip: Trip, *, immediate: bool = False) -> None:
+        target = trip.pop_next()
         if target is None:
-            if self.debug and self.waiting_requests:
-                print(f"电梯 {elevator.id} 暂无可派目标，仍有 {len(self.waiting_requests)} 名乘客待分配")
-            if (
-                elevator.current_floor != self.default_idle_floor
-                and not elevator.passengers
-                and not self.waiting_requests
-            ):
-                elevator.go_to_floor(self.default_idle_floor)
             return
-        if (
-            target == elevator.current_floor
-            and request is not None
-            and not elevator.passengers
-            and elevator.run_status.name.lower() == "stopped"
-        ):
-            self._mark_request_assigned(request, elevator.id)
+        pending_command = self.pending_targets.get(elevator.id)
+        if pending_command is not None and pending_command == target:
             return
-        current_target = getattr(elevator, "target_floor", None)
-        next_target = getattr(elevator, "next_target_floor", None)
-        already_scheduled = self.dispatch_history[elevator.id][-1:] == [target]
-        if already_scheduled and (current_target == target or next_target == target):
-            return
-        if pending_command is not None and pending_command != elevator.current_floor and pending_command != target:
-            return
-        if elevator.go_to_floor(target):
+        if immediate:
+            trip.replace_current_stop(target)
+        if elevator.go_to_floor(target, immediate=immediate):
             self.dispatch_history[elevator.id].append(target)
-            if request is not None:
-                self._mark_request_assigned(request, elevator.id)
             self.pending_targets[elevator.id] = target
         else:
-            if request is not None and self.waiting_requests.get(request.passenger_id) is request:
-                self._clear_request_assignment(request)
             if self.debug:
-                print(f"电梯 {elevator.id} 派发失败，目标 F{target}")
+                print(f"电梯 {elevator.id} 目标 F{target} 下发失败")
+            trip.add_stop(target, to_front=True)
 
-    def _pick_next_destination(self, elevator: ProxyElevator) -> Tuple[Optional[int], Optional[PendingRequest]]:
-        """计算电梯的下一目标楼层"""
-        drop_counter = self.drop_targets.get(elevator.id, Counter())
-        if drop_counter:
-            candidates = [floor for floor, count in drop_counter.items() if count > 0]
-            if candidates:
-                candidates.sort(key=lambda floor: (abs(floor - elevator.current_floor), floor))
-                return candidates[0], None
-        candidate = self._choose_waiting_request(elevator)
-        if candidate:
-            request = candidate
-            self._mark_request_assigned(request, elevator.id)
-            return request.origin, request
-        return None, None
+    def _release_trip(self, elevator_id: int) -> None:
+        trip = self.active_trips.pop(elevator_id, None)
+        if not trip:
+            return
+        for passenger_id in list(trip.reserved_passengers):
+            request = self.waiting_requests.get(passenger_id)
+            if request is not None:
+                self._clear_request_assignment(request)
+        trip.clear_reservations()
 
-    def _choose_waiting_request(self, elevator: ProxyElevator) -> Optional[PendingRequest]:
-        """
-        从等待队列中挑选最合适的乘客
-        策略：优先选择距离最近、尚未被其他电梯抢占的呼叫；如无可用请求，则尝试接过超时太久的请求
-        """
-        unclaimed: List[PendingRequest] = []
-        for req in self.waiting_requests.values():
-            assigned_id = req.assigned_elevator
-            if assigned_id not in (None, elevator.id):
-                assigned_elevator = next((e for e in self.elevators if e.id == assigned_id), None)
-                wait_duration = self.last_known_tick - (req.assigned_tick or self.last_known_tick)
-                assigned_pending = self.pending_assignments_count.get(assigned_id, 0)
-                assigned_passengers = len(assigned_elevator.passengers) if assigned_elevator is not None else 0
-                effective_load = assigned_pending + assigned_passengers
-                assigned_busy = (
-                    assigned_elevator is None
-                    or effective_load > 1
-                    or assigned_elevator.run_status.name.lower() != "stopped"
-                    or bool(assigned_elevator.passengers)
-                )
-                if assigned_busy and wait_duration >= self.reassign_after_ticks:
-                    self._clear_request_assignment(req)
-                else:
-                    continue
-            if not self._elevator_can_serve_request(elevator, req):
-                if req.assigned_elevator == elevator.id:
-                    self._clear_request_assignment(req)
-                continue
-            unclaimed.append(req)
-        if not unclaimed:
+    def _plan_trip_for_elevator(self, elevator: ProxyElevator) -> Optional[Trip]:
+        total_waiting = len(self.waiting_requests)
+        if elevator.id in self.heavy_elevators and not self._should_activate_heavy(total_waiting):
             return None
-        unclaimed.sort(key=lambda req: (req.priority_key(elevator.current_floor), req.arrive_tick))
-        return unclaimed[0]
+        zone = self.zone_bounds.get(elevator.id, (self.base_floor, self.top_floor))
+        drop_floors = self._collect_drop_targets(elevator)
+        if drop_floors:
+            inferred_direction = Direction.UP if max(drop_floors) > elevator.current_floor else Direction.DOWN
+        else:
+            inferred_direction = Direction.UP if self.mode == TrafficMode.UP_PEAK else (
+                Direction.DOWN if self.mode == TrafficMode.DOWN_PEAK else Direction.STOPPED
+            )
+        if self.mode == TrafficMode.UP_PEAK:
+            direction = Direction.UP
+            trip = Trip(direction=direction, corridor_low=zone[0], corridor_high=zone[1])
+            self._populate_trip_with_dropoffs(trip, drop_floors)
+            self._allocate_up_peak_requests(elevator, trip, zone)
+            return trip if trip.has_pending() else None
+        if self.mode == TrafficMode.DOWN_PEAK:
+            direction = Direction.DOWN
+            trip = Trip(direction=direction, corridor_low=zone[0], corridor_high=zone[1])
+            self._populate_trip_with_dropoffs(trip, drop_floors)
+            self._allocate_down_peak_requests(elevator, trip, zone)
+            return trip if trip.has_pending() else None
+        # 均衡模式
+        direction = inferred_direction if inferred_direction != Direction.STOPPED else self._pick_balanced_direction(elevator, zone)
+        if direction == Direction.STOPPED:
+            direction = Direction.UP if elevator.current_floor <= zone[0] else Direction.DOWN
+        trip = Trip(direction=direction, corridor_low=zone[0], corridor_high=zone[1])
+        self._populate_trip_with_dropoffs(trip, drop_floors)
+        self._allocate_balanced_requests(elevator, trip, zone, direction)
+        return trip if trip.has_pending() else None
 
-    def _adjust_pending_count(self, elevator_id: int, delta: int) -> None:
-        current = self.pending_assignments_count.get(elevator_id, 0) + delta
-        self.pending_assignments_count[elevator_id] = current if current > 0 else 0
+    def _populate_trip_with_dropoffs(self, trip: Trip, drop_floors: List[int]) -> None:
+        if not drop_floors:
+            return
+        if trip.direction == Direction.UP:
+            for floor in sorted(drop_floors):
+                trip.add_stop(floor)
+        elif trip.direction == Direction.DOWN:
+            for floor in sorted(drop_floors, reverse=True):
+                trip.add_stop(floor)
+        else:
+            for floor in drop_floors:
+                trip.add_stop(floor)
 
-    def _mark_request_assigned(self, request: PendingRequest, elevator_id: int) -> None:
-        previous = request.assigned_elevator
-        if previous is not None and previous != elevator_id:
-            self._adjust_pending_count(previous, -1)
-        if previous != elevator_id:
-            self._adjust_pending_count(elevator_id, 1)
-        request.assigned_elevator = elevator_id
-        request.assigned_tick = self.last_known_tick
+    def _allocate_up_peak_requests(self, elevator: ProxyElevator, trip: Trip, zone: Tuple[int, int]) -> None:
+        capacity = self._available_capacity(elevator, trip)
+        if capacity <= 0:
+            return
+        target_load = max(0, int(math.ceil(elevator.max_capacity * self.target_load_factor)) - len(elevator.passengers))
+        capacity = min(capacity, target_load)
+        if capacity <= 0:
+            return
+        lobby_requests = self._collect_requests_for_direction(
+            Direction.UP,
+            zone,
+            elevator.id,
+            origins=[self.base_floor],
+            check_destination=True,
+            ignore_origin_zone=True,
+        )
+        picked = self._reserve_requests_for_trip(elevator, trip, lobby_requests, capacity)
+        capacity -= picked
+        if capacity <= 0:
+            return
+        corridor_requests = self._collect_requests_for_direction(
+            Direction.UP,
+            zone,
+            elevator.id,
+            check_destination=True,
+        )
+        corridor_requests = [req for req in corridor_requests if req.passenger_id not in trip.reserved_passengers]
+        self._reserve_requests_for_trip(elevator, trip, corridor_requests, capacity)
 
-    def _clear_request_assignment(self, request: PendingRequest) -> None:
-        previous = request.assigned_elevator
-        if previous is not None:
-            self._adjust_pending_count(previous, -1)
-        request.assigned_elevator = None
-        request.assigned_tick = None
+    def _allocate_down_peak_requests(self, elevator: ProxyElevator, trip: Trip, zone: Tuple[int, int]) -> None:
+        capacity = self._available_capacity(elevator, trip)
+        if capacity <= 0:
+            return
+        target_load = max(0, int(math.ceil(elevator.max_capacity * self.target_load_factor)) - len(elevator.passengers))
+        capacity = min(capacity, target_load)
+        if capacity <= 0:
+            return
+        down_requests = self._collect_requests_for_direction(Direction.DOWN, zone, elevator.id)
+        down_requests.sort(key=lambda req: (-req.origin, req.arrive_tick))
+        self._reserve_requests_for_trip(elevator, trip, down_requests, capacity)
+
+    def _allocate_balanced_requests(
+        self, elevator: ProxyElevator, trip: Trip, zone: Tuple[int, int], direction: Direction
+    ) -> None:
+        capacity = self._available_capacity(elevator, trip)
+        if capacity <= 0:
+            return
+        target_load = max(0, int(math.ceil(elevator.max_capacity * self.target_load_factor)) - len(elevator.passengers))
+        capacity = min(capacity, target_load)
+        if capacity <= 0:
+            return
+        requests = self._collect_requests_for_direction(direction, zone, elevator.id)
+        requests.sort(key=lambda req: (abs(req.origin - elevator.current_floor), req.arrive_tick))
+        self._reserve_requests_for_trip(elevator, trip, requests, capacity)
+
+    def _available_capacity(self, elevator: ProxyElevator, trip: Trip) -> int:
+        return max(0, elevator.max_capacity - len(elevator.passengers) - trip.total_reserved_boarding())
+
+    def _reserve_requests_for_trip(
+        self, elevator: ProxyElevator, trip: Trip, requests: Iterable[PendingRequest], capacity: int
+    ) -> int:
+        reserved = 0
+        for request in requests:
+            if reserved >= capacity:
+                break
+            assigned_id = self._ensure_assignment_valid(request)
+            if assigned_id is not None and assigned_id != elevator.id:
+                continue
+            if not self._elevator_can_serve_request(elevator, request):
+                continue
+            self._mark_request_assigned(request, elevator.id)
+            trip.adjust_reservation(request.origin, 1, request.passenger_id)
+            trip.add_stop(request.origin, to_front=True)
+            if trip.direction == Direction.UP:
+                trip.add_stop(request.destination)
+            elif trip.direction == Direction.DOWN:
+                trip.add_stop(request.destination)
+            else:
+                trip.add_stop(request.destination)
+            reserved += 1
+        return reserved
+
+    def _pick_balanced_direction(self, elevator: ProxyElevator, zone: Tuple[int, int]) -> Direction:
+        up_count = sum(1 for req in self.waiting_requests.values() if req.direction == Direction.UP and zone[0] <= req.origin <= zone[1])
+        down_count = sum(1 for req in self.waiting_requests.values() if req.direction == Direction.DOWN and zone[0] <= req.origin <= zone[1])
+        if up_count == 0 and down_count == 0:
+            return Direction.STOPPED
+        if up_count >= down_count:
+            return Direction.UP
+        return Direction.DOWN
+
+    # ========= 即时插站 ========= #
+    def _attempt_inline_stop(self, elevator: ProxyElevator, floor: int, direction: Direction) -> None:
+        if direction not in (Direction.UP, Direction.DOWN):
+            return
+        trip = self.active_trips.get(elevator.id)
+        if trip is None or trip.direction != direction:
+            return
+        if trip.current_stop == floor or floor in trip.stops:
+            return
+        zone = self.zone_bounds.get(elevator.id, (self.base_floor, self.top_floor))
+        if not (zone[0] <= floor <= zone[1]):
+            return
+        remaining_capacity = self._available_capacity(elevator, trip)
+        if remaining_capacity <= 0:
+            return
+        inline_requests = self._collect_requests_specific_floor(floor, direction, elevator.id)
+        inline_requests = [req for req in inline_requests if req.passenger_id not in trip.reserved_passengers]
+        if not inline_requests:
+            return
+        picked = self._reserve_requests_for_trip(elevator, trip, inline_requests, remaining_capacity)
+        if picked == 0:
+            return
+        previous_target = trip.peek_next()
+        trip.replace_current_stop(floor)
+        if previous_target is not None and previous_target != floor:
+            trip.add_stop(previous_target, to_front=True)
+        self._dispatch_next_stop(elevator, trip, immediate=True)
+
+    # ========= 模式判别与分区 ========= #
+    def _refresh_operational_context(self) -> None:
+        self._rebuild_floor_snapshot()
+        new_mode = self._analyze_mode()
+        mode_changed = new_mode != self.mode
+        self.mode = new_mode
+        self._recompute_zones()
+        if mode_changed:
+            self._reset_all_trips()
+
+    def _rebuild_floor_snapshot(self) -> None:
+        snapshot: Dict[int, FloorDemand] = {}
+        for request in self.waiting_requests.values():
+            data = snapshot.setdefault(request.origin, FloorDemand())
+            if request.direction == Direction.UP:
+                data.up_count += 1
+                data.up_destinations[request.destination] += 1
+            elif request.direction == Direction.DOWN:
+                data.down_count += 1
+                data.down_destinations[request.destination] += 1
+        for floor in range(self.base_floor, self.top_floor + 1):
+            snapshot.setdefault(floor, FloorDemand())
+        self.floor_snapshot = snapshot
+
+    def _analyze_mode(self) -> TrafficMode:
+        total_up = sum(data.up_count for data in self.floor_snapshot.values())
+        total_down = sum(data.down_count for data in self.floor_snapshot.values())
+        total_waiting = total_up + total_down
+        if total_waiting == 0:
+            return TrafficMode.INTERFLOOR
+        base_up = self.floor_snapshot.get(self.base_floor, FloorDemand()).up_count
+        top_down = max((data.down_count for floor, data in self.floor_snapshot.items() if floor >= self.top_floor - 1), default=0)
+        up_ratio = total_up / total_waiting
+        down_ratio = total_down / total_waiting
+        if up_ratio >= 0.6 and total_up > 0 and base_up / total_up >= 0.5:
+            return TrafficMode.UP_PEAK
+        if down_ratio >= 0.6 and total_down > 0 and top_down / total_down >= 0.4:
+            return TrafficMode.DOWN_PEAK
+        return TrafficMode.INTERFLOOR
+
+    def _recompute_zones(self) -> None:
+        elevators = list(self.elevators)
+        if not elevators:
+            return
+        floors_count = self.top_floor - self.base_floor + 1
+        if floors_count <= 0:
+            self.zone_bounds = {e.id: (self.base_floor, self.top_floor) for e in elevators}
+            return
+        sorted_ids = sorted(e.id for e in elevators)
+        chunk = math.ceil(floors_count / len(elevators))
+        if self.mode == TrafficMode.UP_PEAK:
+            for index, elevator_id in enumerate(sorted_ids):
+                low = self.base_floor + index * chunk
+                high = min(self.top_floor, low + chunk - 1)
+                self.zone_bounds[elevator_id] = (low, high)
+        elif self.mode == TrafficMode.DOWN_PEAK:
+            for index, elevator_id in enumerate(sorted_ids):
+                high = self.top_floor - index * chunk
+                low = max(self.base_floor, high - chunk + 1)
+                self.zone_bounds[elevator_id] = (low, high)
+        else:
+            for index, elevator_id in enumerate(sorted_ids):
+                low = self.base_floor + index * chunk
+                high = min(self.top_floor, low + chunk - 1)
+                self.zone_bounds[elevator_id] = (low, high)
+        self._compute_idle_layout(elevators)
+
+    def _reset_all_trips(self) -> None:
+        for request in self.waiting_requests.values():
+            if request.assigned_elevator is not None:
+                self._clear_request_assignment(request)
+        self.active_trips.clear()
+        for elevator_id in self.pending_targets:
+            self.pending_targets[elevator_id] = None
+        for elevator in self.elevators:
+            self.pending_assignments_count[elevator.id] = 0
+
+    # ========= 超时与唤醒 ========= #
+    def _wake_idle_elevators(self) -> None:
+        for elevator in self.elevators:
+            if elevator.run_status.name.lower() == "stopped" and not elevator.passengers:
+                self._assign_trip_or_idle(elevator)
+
+    def _should_activate_heavy(self, total_waiting: int) -> bool:
+        baseline_capacity = sum(
+            elevator.max_capacity for elevator in self.elevators if elevator.id not in self.heavy_elevators
+        )
+        if baseline_capacity == 0:
+            return True
+        return total_waiting >= baseline_capacity * self.heavy_activation_ratio
+
+    # ========= 工具函数 ========= #
+    def _compute_idle_layout(self, elevators: List[ProxyElevator]) -> None:
+        count = len(elevators)
+        if count == 0:
+            self.idle_station_map = {}
+            return
+        span = max(1, self.top_floor - self.base_floor)
+        stations: List[int] = []
+        if count == 1:
+            stations = [self.base_floor]
+        else:
+            for index in range(count):
+                ratio = index / (count - 1)
+                station = int(round(self.base_floor + ratio * span))
+                stations.append(min(max(station, self.base_floor), self.top_floor))
+        sorted_elevators = sorted(elevators, key=lambda e: e.id)
+        self.idle_station_map = {elevator.id: stations[idx] for idx, elevator in enumerate(sorted_elevators)}
+
+    def _send_elevator_to_idle(self, elevator: ProxyElevator) -> None:
+        if self.waiting_requests:
+            return
+        station = self.idle_station_map.get(elevator.id, self.base_floor)
+        if elevator.current_floor != station:
+            if elevator.go_to_floor(station):
+                self.pending_targets[elevator.id] = station
+
+    def _collect_requests_for_direction(
+        self,
+        direction: Direction,
+        zone: Tuple[int, int],
+        allow_elevator: Optional[int],
+        origins: Optional[List[int]] = None,
+        *,
+        check_destination: bool = False,
+        ignore_origin_zone: bool = False,
+    ) -> List[PendingRequest]:
+        result: List[PendingRequest] = []
+        for request in self.waiting_requests.values():
+            if request.direction != direction:
+                continue
+            assigned_id = self._ensure_assignment_valid(request)
+            if assigned_id is not None and assigned_id != allow_elevator:
+                continue
+            if origins is not None and request.origin not in origins:
+                continue
+            if not ignore_origin_zone and (request.origin < zone[0] or request.origin > zone[1]):
+                continue
+            if check_destination and (request.destination < zone[0] or request.destination > zone[1]):
+                continue
+            result.append(request)
+        result.sort(key=lambda req: (req.arrive_tick, req.origin))
+        return result
+
+    def _collect_requests_specific_floor(
+        self, floor: int, direction: Direction, allow_elevator: Optional[int] = None
+    ) -> List[PendingRequest]:
+        result = []
+        for request in self.waiting_requests.values():
+            if request.origin != floor or request.direction != direction:
+                continue
+            assigned_id = self._ensure_assignment_valid(request)
+            if assigned_id is not None and assigned_id != allow_elevator:
+                continue
+            result.append(request)
+        result.sort(key=lambda req: req.arrive_tick)
+        return result
+
+    def _ensure_assignment_valid(self, request: PendingRequest) -> Optional[int]:
+        assigned_id = request.assigned_elevator
+        if assigned_id is None:
+            return None
+        assigned_elevator = next((e for e in self.elevators if e.id == assigned_id), None)
+        wait_duration = self.last_known_tick - (request.assigned_tick or self.last_known_tick)
+        if assigned_elevator is None:
+            self._clear_request_assignment(request)
+            return None
+        assigned_pending = self.pending_assignments_count.get(assigned_id, 0)
+        assigned_passengers = len(assigned_elevator.passengers)
+        effective_load = assigned_pending + assigned_passengers
+        busy = assigned_elevator.run_status.name.lower() != "stopped" or bool(assigned_elevator.passengers)
+        if wait_duration >= self.reassign_after_ticks and (busy or effective_load > 1):
+            self._clear_request_assignment(request)
+            return None
+        return assigned_id
+
+    def _collect_drop_targets(self, elevator: ProxyElevator) -> List[int]:
+        destinations = list(elevator.passenger_destinations.values())
+        unique = sorted(set(destinations))
+        return unique
 
     def _should_terminate(self, state: SimulationState) -> bool:
         if self.waiting_requests:
             return False
-        if any(counter for counter in self.drop_targets.values()):
+        if any(trip.has_pending() for trip in self.active_trips.values()):
             return False
         if any(self.pending_assignments_count.get(e.id, 0) for e in state.elevators):
             return False
@@ -361,8 +761,8 @@ class GreedyNearestController(ElevatorController):
         return True
 
     def _print_final_metrics(self, state: SimulationState) -> None:
-        """输出最终指标与评测结算Tick"""
-        pprint(state.metrics.to_dict())
+        metrics = state.metrics.to_dict()
+        print(metrics)
         last_arrive_tick = 0
         if state.passengers:
             last_arrive_tick = max(passenger.arrive_tick for passenger in state.passengers.values())
@@ -374,6 +774,26 @@ class GreedyNearestController(ElevatorController):
             f"(最后乘客出现Tick={last_arrive_tick}, 楼层数={floor_count}, 单层补偿={per_floor_buffer}, "
             f"公式: 最晚出现Tick + 楼层数×单层补偿)"
         )
+
+    def _mark_request_assigned(self, request: PendingRequest, elevator_id: int) -> None:
+        previous = request.assigned_elevator
+        if previous is not None and previous != elevator_id:
+            self._adjust_pending_count(previous, -1)
+        if previous != elevator_id:
+            self._adjust_pending_count(elevator_id, 1)
+        request.assigned_elevator = elevator_id
+        request.assigned_tick = self.last_known_tick
+
+    def _clear_request_assignment(self, request: PendingRequest) -> None:
+        previous = request.assigned_elevator
+        if previous is not None:
+            self._adjust_pending_count(previous, -1)
+        request.assigned_elevator = None
+        request.assigned_tick = None
+
+    def _adjust_pending_count(self, elevator_id: int, delta: int) -> None:
+        current = self.pending_assignments_count.get(elevator_id, 0) + delta
+        self.pending_assignments_count[elevator_id] = current if current > 0 else 0
 
     def _elevator_can_serve_request(self, elevator: ProxyElevator, request: PendingRequest) -> bool:
         served = getattr(elevator, "served_floors", None)
