@@ -765,6 +765,8 @@ class GreedyNearestController(ElevatorController):
         return unique
 
     def _should_terminate(self, state: SimulationState) -> bool:
+        if self.current_tick < self.current_traffic_max_tick:
+            return False
         if self.waiting_requests:
             return False
         if any(trip.has_pending() for trip in self.active_trips.values()):
