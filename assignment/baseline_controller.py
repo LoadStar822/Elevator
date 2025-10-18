@@ -351,6 +351,9 @@ class GreedyNearestController(ElevatorController):
 
     # ========= Trip 规划与调度 ========= #
     def _assign_trip_or_idle(self, elevator: ProxyElevator) -> None:
+        pending_cmd = self.pending_targets.get(elevator.id)
+        if pending_cmd is not None and elevator.current_floor == pending_cmd:
+            self.pending_targets[elevator.id] = None
         trip = self.active_trips.get(elevator.id)
         if trip and trip.has_pending():
             self._dispatch_next_stop(elevator, trip)
@@ -368,6 +371,13 @@ class GreedyNearestController(ElevatorController):
         target = trip.pop_next()
         if target is None:
             return
+        while target == elevator.current_floor:
+            trip.mark_stop_completed(target)
+            target = trip.pop_next()
+            if target is None:
+                self.pending_targets[elevator.id] = None
+                self._assign_trip_or_idle(elevator)
+                return
         pending_command = self.pending_targets.get(elevator.id)
         if pending_command is not None and pending_command == target:
             return
@@ -379,6 +389,7 @@ class GreedyNearestController(ElevatorController):
         else:
             if self.debug:
                 print(f"电梯 {elevator.id} 目标 F{target} 下发失败")
+            trip.current_stop = None
             trip.add_stop(target, to_front=True)
 
     def _release_trip(self, elevator_id: int) -> None:
@@ -429,12 +440,18 @@ class GreedyNearestController(ElevatorController):
             return
         if trip.direction == Direction.UP:
             for floor in sorted(drop_floors):
+                trip.corridor_low = min(trip.corridor_low, floor)
+                trip.corridor_high = max(trip.corridor_high, floor)
                 trip.add_stop(floor)
         elif trip.direction == Direction.DOWN:
             for floor in sorted(drop_floors, reverse=True):
+                trip.corridor_low = min(trip.corridor_low, floor)
+                trip.corridor_high = max(trip.corridor_high, floor)
                 trip.add_stop(floor)
         else:
             for floor in drop_floors:
+                trip.corridor_low = min(trip.corridor_low, floor)
+                trip.corridor_high = max(trip.corridor_high, floor)
                 trip.add_stop(floor)
 
     def _allocate_up_peak_requests(self, elevator: ProxyElevator, trip: Trip, zone: Tuple[int, int]) -> None:
@@ -475,6 +492,13 @@ class GreedyNearestController(ElevatorController):
         if capacity <= 0:
             return
         down_requests = self._collect_requests_for_direction(Direction.DOWN, zone, elevator.id)
+        if not down_requests:
+            down_requests = self._collect_requests_for_direction(
+                Direction.DOWN,
+                (self.base_floor, self.top_floor),
+                elevator.id,
+                ignore_origin_zone=True,
+            )
         down_requests.sort(key=lambda req: (-req.origin, req.arrive_tick))
         self._reserve_requests_for_trip(elevator, trip, down_requests, capacity)
 
@@ -509,6 +533,8 @@ class GreedyNearestController(ElevatorController):
                 continue
             self._mark_request_assigned(request, elevator.id)
             trip.adjust_reservation(request.origin, 1, request.passenger_id)
+            trip.corridor_low = min(trip.corridor_low, request.origin, request.destination)
+            trip.corridor_high = max(trip.corridor_high, request.origin, request.destination)
             trip.add_stop(request.origin, to_front=True)
             if trip.direction == Direction.UP:
                 trip.add_stop(request.destination)
@@ -537,8 +563,9 @@ class GreedyNearestController(ElevatorController):
             return
         if trip.current_stop == floor or floor in trip.stops:
             return
-        zone = self.zone_bounds.get(elevator.id, (self.base_floor, self.top_floor))
-        if not (zone[0] <= floor <= zone[1]):
+        corridor_low = min(trip.corridor_low, trip.corridor_high)
+        corridor_high = max(trip.corridor_low, trip.corridor_high)
+        if not (corridor_low <= floor <= corridor_high):
             return
         remaining_capacity = self._available_capacity(elevator, trip)
         if remaining_capacity <= 0:
